@@ -26,7 +26,7 @@ services:
     env_file: .env
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
-      - "8188:8000"
+      - "127.0.0.1:8188:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,11 +52,12 @@ services:
         condition: service_started
 
   admin:
-    build: ./frontend
-    environment:
-      VITE_API_URL: http://localhost:8000
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     ports:
-      - "5173:80"
+      - "127.0.0.1:5173:80"
     depends_on:
       api:
         condition: service_started
