@@ -140,6 +140,14 @@ class AnalyticsResponse(BaseModel):
     total_bot_users: int
     new_bot_users: int
     known_bot_blocks: int
+    active_users_1d: int
+    active_users_7d: int
+    active_users_30d: int
+    active_devices: int
+    funnel_bot_users: int
+    funnel_site_users: int
+    funnel_happ_users: int
+    funnel_subscription_users: int
     bot_starts: int
     unique_site_visitors: int
     happ_launches: int

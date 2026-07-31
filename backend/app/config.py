@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     subgram_api_key: str = ""
     subgram_base_url: str = "https://api.subgram.org"
     subgram_enabled: bool = False
+    api_rate_limit_per_minute: int = 120
+    subscription_rate_limit_per_minute: int = 20
+    login_rate_limit_per_15_minutes: int = 10
+    alert_check_minutes: int = 15
+    alert_cooldown_minutes: int = 60
+    node_drop_alert_ratio: float = 0.5
+    tls_alert_days: int = 14
 
     @property
     def admin_ids(self) -> set[int]:

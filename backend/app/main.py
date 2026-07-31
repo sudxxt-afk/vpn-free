@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,7 @@ from app.services.github import SourceError, normalize_github_url, refresh_sourc
 from app.services.parser import classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.telegram import has_required_memberships, validate_bot_admin
 from app.services.subgram import get_partner_access
+from app.services.rate_limit import is_allowed
 
 settings = get_settings()
 
@@ -46,6 +48,22 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Zaza VPN", version="0.1.0", lifespan=lifespan)
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        result = await is_allowed(request)
+        if result is not None:
+            allowed, limit, window = result
+            if not allowed:
+                return Response(status_code=429, content='{"detail":"Слишком много запросов. Попробуйте позже"}', media_type="application/json", headers={"Retry-After": str(window), "X-RateLimit-Limit": str(limit)})
+        response = await call_next(request)
+        if result is not None:
+            response.headers["X-RateLimit-Limit"] = str(result[1])
+        return response
+
+
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_origin],
@@ -186,8 +204,9 @@ def metrics(request: Request, db: Session = Depends(get_db), limit: int = 36) ->
 def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -> AnalyticsResponse:
     require_admin(request)
     days = max(7, min(days, 90))
-    start = datetime.now(timezone.utc) - timedelta(days=days - 1)
-    events = db.scalars(select(AnalyticsEvent).where(AnalyticsEvent.created_at >= start).order_by(AnalyticsEvent.created_at)).all()
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=days - 1)
+    events = db.scalars(select(AnalyticsEvent).where(AnalyticsEvent.created_at >= now - timedelta(days=30)).order_by(AnalyticsEvent.created_at)).all()
     points = {str((start + timedelta(days=offset)).date()): {"bot_starts": 0, "site_visits": 0, "happ_launches": 0, "vpn_issued": 0, "subscription_opens": 0} for offset in range(days)}
     event_fields = {"bot_start": "bot_starts", "site_visit": "site_visits", "happ_launch": "happ_launches", "vpn_issued": "vpn_issued", "subscription_open": "subscription_opens"}
     for event in events:
@@ -196,10 +215,21 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
         if key in points and field:
             points[key][field] += 1
     count = lambda name: sum(1 for event in events if event.event_type == name)
+    def unique_users(event_types: set[str], since: datetime) -> int:
+        return len({event.telegram_user_id for event in events if event.created_at >= since and event.event_type in event_types and event.telegram_user_id is not None})
+    active_types = {"bot_start", "site_visit", "happ_launch", "vpn_issued", "subscription_open"}
     return AnalyticsResponse(
         total_bot_users=db.scalar(select(func.count()).select_from(TelegramUser)) or 0,
         new_bot_users=db.scalar(select(func.count()).select_from(TelegramUser).where(TelegramUser.created_at >= start)) or 0,
         known_bot_blocks=db.scalar(select(func.count()).select_from(TelegramUser).where(TelegramUser.bot_blocked_at.is_not(None))) or 0,
+        active_users_1d=unique_users(active_types, now - timedelta(days=1)),
+        active_users_7d=unique_users(active_types, now - timedelta(days=7)),
+        active_users_30d=unique_users(active_types, now - timedelta(days=30)),
+        active_devices=db.scalar(select(func.count()).select_from(Device).where(Device.is_revoked.is_(False))) or 0,
+        funnel_bot_users=unique_users({"bot_start"}, start),
+        funnel_site_users=unique_users({"site_visit"}, start),
+        funnel_happ_users=unique_users({"happ_launch"}, start),
+        funnel_subscription_users=unique_users({"subscription_open"}, start),
         bot_starts=count("bot_start"),
         unique_site_visitors=len({event.device_id for event in events if event.event_type == "site_visit" and event.device_id is not None}),
         happ_launches=count("happ_launch"),

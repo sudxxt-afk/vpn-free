@@ -10,7 +10,7 @@ type Node = { id: string; protocol: string; host: string; port: number; state: "
 type Channel = { id: string; chat_id: number; title: string; username: string | null; is_active: boolean };
 type PoolPolicy = { vless_reality_limit: number; vless_ws_limit: number; vless_other_limit: number; hysteria2_limit: number; tuic_limit: number; trojan_limit: number; shadowsocks_limit: number; vmess_limit: number; updated_at: string | null };
 type AnalyticsDay = { date: string; bot_starts: number; site_visits: number; happ_launches: number; vpn_issued: number; subscription_opens: number };
-type Analytics = { total_bot_users: number; new_bot_users: number; known_bot_blocks: number; bot_starts: number; unique_site_visitors: number; happ_launches: number; vpn_issued: number; subscription_opens: number; days: AnalyticsDay[] };
+type Analytics = { total_bot_users: number; new_bot_users: number; known_bot_blocks: number; active_users_1d: number; active_users_7d: number; active_users_30d: number; active_devices: number; funnel_bot_users: number; funnel_site_users: number; funnel_happ_users: number; funnel_subscription_users: number; bot_starts: number; unique_site_visitors: number; happ_launches: number; vpn_issued: number; subscription_opens: number; days: AnalyticsDay[] };
 
 const nav = [
   { key: "overview", label: "Обзор", icon: Gauge },
@@ -124,6 +124,8 @@ function AnalyticsPage({ analytics }: { analytics: Analytics | null }) {
   if (!analytics) return <section className="page-stack"><div className="empty"><p>Загрузка аналитики…</p></div></section>;
   const cards = [
     ["Пользователи бота", analytics.total_bot_users, "уникальные Telegram-аккаунты", Users, "violet"],
+    ["Активны за 30 дней", analytics.active_users_30d, `за 7 дней: ${analytics.active_users_7d} · за сутки: ${analytics.active_users_1d}`, Activity, "blue"],
+    ["Действующие устройства", analytics.active_devices, "подписки, которые не отозваны", Server, "mint"],
     ["Заблокировали бота", analytics.known_bot_blocks, "подтверждено Telegram при отправке", CircleAlert, "amber"],
     ["Переходы на сайт", analytics.unique_site_visitors, "уникальные устройства за 14 дней", Activity, "blue"],
     ["Открытия HAPP", analytics.happ_launches, "нажатия «Открыть HAPP»", ArrowUpRight, "mint"],
@@ -133,7 +135,7 @@ function AnalyticsPage({ analytics }: { analytics: Analytics | null }) {
   return <section className="page-stack"><div className="page-intro"><div><p className="eyebrow">PRODUCT ANALYTICS</p><h2>Бот и подключение</h2><p>События без хранения ссылок подписки: старты бота, переходы на сайт, импорт в HAPP и выдачи VPN.</p></div><span className="status-dot">14 ДНЕЙ</span></div>
     <div className="metric-grid">{cards.map(([label, value, description, Icon, tone]) => <article className="metric-card" key={label}><div className={`metric-icon ${tone}`}><Icon size={20}/></div><p>{label}</p><strong>{value}</strong><span>{description}</span></article>)}</div>
     <article className="panel analytics-panel"><div className="panel-head"><div><p className="eyebrow">FUNNEL BY DAY</p><h3>Активность пользователей</h3></div><div className="analytics-legend"><span><i className="dot violet"/>бот</span><span><i className="dot blue"/>сайт</span><span><i className="dot mint"/>HAPP</span></div></div><div className="analytics-bars">{analytics.days.map((day) => <div className="analytics-day" key={day.date}><div className="bar-stack" title={`${day.date}: бот ${day.bot_starts}, сайт ${day.site_visits}, HAPP ${day.happ_launches}`}><i className="bar bot" style={{ height: `${(day.bot_starts / max) * 100}%` }}/><i className="bar site" style={{ height: `${(day.site_visits / max) * 100}%` }}/><i className="bar happ" style={{ height: `${(day.happ_launches / max) * 100}%` }}/></div><small>{new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(new Date(`${day.date}T00:00:00Z`))}</small></div>)}</div></article>
-    <article className="panel analytics-detail"><div><p className="eyebrow">SUBSCRIPTIONS</p><h3>Открытия подписок</h3><strong>{analytics.subscription_opens}</strong><p>Загрузки подписки HAPP за последние 14 дней.</p></div><div><p className="eyebrow">NEW USERS</p><h3>Новые пользователи</h3><strong>{analytics.new_bot_users}</strong><p>Уникальные Telegram-аккаунты за последние 14 дней.</p></div></article>
+    <article className="panel analytics-detail"><div><p className="eyebrow">SUBSCRIPTIONS</p><h3>Открытия подписок</h3><strong>{analytics.subscription_opens}</strong><p>Загрузки подписки HAPP за последние 14 дней.</p></div><div><p className="eyebrow">NEW USERS</p><h3>Новые пользователи</h3><strong>{analytics.new_bot_users}</strong><p>Уникальные Telegram-аккаунты за последние 14 дней.</p></div><div><p className="eyebrow">FUNNEL</p><h3>Бот → сайт → HAPP → подписка</h3><strong>{analytics.funnel_bot_users} → {analytics.funnel_site_users} → {analytics.funnel_happ_users} → {analytics.funnel_subscription_users}</strong><p>Уникальные пользователи за последние 14 дней.</p></div></article>
   </section>;
 }
 
