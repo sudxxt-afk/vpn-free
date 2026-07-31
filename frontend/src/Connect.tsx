@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { API } from "./api";
-import heroImage from "./assets/zaza-hero.png";
+import heroImage from "./assets/zaza-hero.webp";
 import "./connect.css";
 
 type Platform = "android" | "ios" | "desktop" | "other";
