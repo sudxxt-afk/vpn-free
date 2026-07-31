@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { API } from "./api";
 import heroImage from "./assets/zaza-hero.png";
 import "./connect.css";
@@ -42,6 +42,17 @@ export function Connect() {
   const happLink = useMemo(() => subscription ? `happ://add/${window.btoa(subscription)}` : "", [subscription]);
   const platformLabel = platform === "other" ? "вашего устройства" : platformNames[platform];
 
+  const track = (eventType: "site_visit" | "happ_launch") => {
+    if (!token) return;
+    void fetch(`${API.replace(/\/$/, "")}/events/landing`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, event_type: eventType }),
+    }).catch(() => undefined);
+  };
+
+  useEffect(() => { track("site_visit"); }, [token]);
+
   const copy = async () => {
     if (!subscription) return;
     await copyText(subscription);
@@ -51,6 +62,7 @@ export function Connect() {
 
   const launchHapp = () => {
     if (!happLink) return;
+    track("happ_launch");
     void copy();
     window.location.href = happLink;
   };

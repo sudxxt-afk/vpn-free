@@ -74,7 +74,11 @@ async def send_subscription(target: Message | CallbackQuery, device: dict) -> No
 
 @dp.message(CommandStart())
 async def start(message: Message) -> None:
-    await ensure_user(message)
+    telegram_id = await ensure_user(message)
+    try:
+        await api("POST", f"/internal/users/{telegram_id}/events", json={"event_type": "bot_start"})
+    except Exception:
+        logging.exception("Unable to record bot start analytics event")
     await message.answer("👋 <b>Добро пожаловать в Zaza VPN</b>\n\nБесплатный VPN с автоматическим выбором сильной ноды для Wi‑Fi и LTE.", reply_markup=menu())
 
 

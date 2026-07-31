@@ -146,6 +146,16 @@ class MetricSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class AnalyticsEvent(Base):
+    """Privacy-preserving product events; subscription tokens are never stored."""
+    __tablename__ = "analytics_events"
+    id: Mapped[uuid.UUID] = uuid_column()
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    telegram_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("telegram_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    device_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("devices.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id: Mapped[uuid.UUID] = uuid_column()

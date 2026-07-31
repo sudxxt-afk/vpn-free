@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, ArrowUpRight, Bell, Check, ChevronRight, CircleAlert, Gauge, Link2, LogOut, Menu, Plus, Radio, RefreshCw, Server, Settings2, ShieldCheck, Users, X } from "lucide-react";
+import { Activity, ArrowUpRight, BarChart3, Bell, Check, ChevronRight, CircleAlert, Gauge, Link2, LogOut, Menu, Plus, Radio, RefreshCw, Server, Settings2, ShieldCheck, Users, X } from "lucide-react";
 import { request } from "./api";
 import { Connect } from "./Connect";
 
@@ -9,9 +9,12 @@ type Source = { id: string; name: string; github_url: string; is_enabled: boolea
 type Node = { id: string; protocol: string; host: string; port: number; state: "candidate" | "active" | "degraded" | "quarantined" | "removed"; score: number; avg_latency_ms: number | null; success_checks: number; failed_checks: number; source_id: string; region: string; region_emoji: string; network_profile: "mobile" | "wifi"; network_label: string; network_emoji: string; profile_priority: number };
 type Channel = { id: string; chat_id: number; title: string; username: string | null; is_active: boolean };
 type PoolPolicy = { vless_reality_limit: number; vless_ws_limit: number; vless_other_limit: number; hysteria2_limit: number; tuic_limit: number; trojan_limit: number; shadowsocks_limit: number; vmess_limit: number; updated_at: string | null };
+type AnalyticsDay = { date: string; bot_starts: number; site_visits: number; happ_launches: number; vpn_issued: number; subscription_opens: number };
+type Analytics = { total_bot_users: number; bot_starts: number; unique_site_visitors: number; happ_launches: number; vpn_issued: number; subscription_opens: number; days: AnalyticsDay[] };
 
 const nav = [
   { key: "overview", label: "Обзор", icon: Gauge },
+  { key: "analytics", label: "Аналитика", icon: BarChart3 },
   { key: "sources", label: "Источники", icon: Link2 },
   { key: "nodes", label: "Ноды", icon: Server },
   { key: "policy", label: "Подписка", icon: Settings2 },
@@ -56,14 +59,15 @@ export function App() {
   const [nodes, setNodes] = useState<Node[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [policy, setPolicy] = useState<PoolPolicy | null>(null);
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [notice, setNotice] = useState("");
 
   const refresh = useCallback(async () => {
     try {
-      const [summary, sourceList, nodeList, channelList, metricList, policyValue] = await Promise.all([
-        request<Dashboard>("/admin/dashboard"), request<Source[]>("/admin/sources"), request<Node[]>("/admin/nodes"), request<Channel[]>("/admin/channels"), request<Metric[]>("/admin/metrics"), request<PoolPolicy>("/admin/pool-policy"),
+      const [summary, sourceList, nodeList, channelList, metricList, policyValue, analyticsValue] = await Promise.all([
+        request<Dashboard>("/admin/dashboard"), request<Source[]>("/admin/sources"), request<Node[]>("/admin/nodes"), request<Channel[]>("/admin/channels"), request<Metric[]>("/admin/metrics"), request<PoolPolicy>("/admin/pool-policy"), request<Analytics>("/admin/analytics"),
       ]);
-      setDashboard(summary); setSources(sourceList); setNodes(nodeList); setChannels(channelList); setMetrics(metricList); setPolicy(policyValue); setAuthenticated(true);
+      setDashboard(summary); setSources(sourceList); setNodes(nodeList); setChannels(channelList); setMetrics(metricList); setPolicy(policyValue); setAnalytics(analyticsValue); setAuthenticated(true);
     } catch { setAuthenticated(false); }
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
@@ -82,6 +86,7 @@ export function App() {
     <main className="content"><header><div className="headline"><button className="icon-button mobile-menu" aria-label="Открыть меню" onClick={() => setCompact(!compact)}><Menu size={20}/></button><div><p className="eyebrow">CONTROL / {page.toUpperCase()}</p><h1>{title}</h1></div></div><div className="header-actions"><button className="icon-button" aria-label="Обновить данные" onClick={() => { refresh(); notify("Данные обновлены"); }}><RefreshCw size={19}/></button><button className="icon-button" aria-label="Уведомления"><Bell size={19}/><i/></button><div className="avatar">A</div></div></header>
       {notice && <div className="toast" role="status"><Check size={17}/>{notice}</div>}
       {page === "overview" && <Overview dashboard={dashboard} metrics={metrics} sources={sources} nodes={nodes} setPage={setPage} />}
+      {page === "analytics" && <AnalyticsPage analytics={analytics} />}
       {page === "sources" && <Sources sources={sources} onChanged={refresh} notify={notify} />}
       {page === "nodes" && <Nodes nodes={nodes} />}
       {page === "policy" && policy && <SubscriptionPolicy policy={policy} onChanged={refresh} notify={notify} />}
@@ -113,6 +118,22 @@ function SignalChart({ metrics }: { metrics: Metric[] }) {
   const min = Math.min(...values); const max = Math.max(...values); const range = Math.max(max - min, 1);
   const points = values.map((value, index) => `${(index / Math.max(values.length - 1, 1)) * 600},${148 - ((value - min) / range) * 110}`).join(" ");
   return <div className="signal-chart" aria-label="График успешности проверок нод"><div className="chart-glow"/><svg viewBox="0 0 600 180" preserveAspectRatio="none"><polyline points={points} fill="none" stroke="currentColor" strokeWidth="3"/></svg><div className="chart-labels"><span>{values[0]}%</span><span>успешность health-check</span><span>{values.at(-1)}%</span></div></div>;
+}
+
+function AnalyticsPage({ analytics }: { analytics: Analytics | null }) {
+  if (!analytics) return <section className="page-stack"><div className="empty"><p>Загрузка аналитики…</p></div></section>;
+  const cards = [
+    ["Пользователи бота", analytics.total_bot_users, "всего Telegram-аккаунтов", Users, "violet"],
+    ["Переходы на сайт", analytics.unique_site_visitors, "уникальные устройства за 14 дней", Activity, "blue"],
+    ["Открытия HAPP", analytics.happ_launches, "нажатия «Открыть HAPP»", ArrowUpRight, "mint"],
+    ["Выдано VPN", analytics.vpn_issued, "новые и перевыпущенные ссылки", ShieldCheck, "amber"],
+  ] as const;
+  const max = Math.max(...analytics.days.map((item) => item.bot_starts + item.site_visits + item.happ_launches), 1);
+  return <section className="page-stack"><div className="page-intro"><div><p className="eyebrow">PRODUCT ANALYTICS</p><h2>Бот и подключение</h2><p>События без хранения ссылок подписки: старты бота, переходы на сайт, импорт в HAPP и выдачи VPN.</p></div><span className="status-dot">14 ДНЕЙ</span></div>
+    <div className="metric-grid">{cards.map(([label, value, description, Icon, tone]) => <article className="metric-card" key={label}><div className={`metric-icon ${tone}`}><Icon size={20}/></div><p>{label}</p><strong>{value}</strong><span>{description}</span></article>)}</div>
+    <article className="panel analytics-panel"><div className="panel-head"><div><p className="eyebrow">FUNNEL BY DAY</p><h3>Активность пользователей</h3></div><div className="analytics-legend"><span><i className="dot violet"/>бот</span><span><i className="dot blue"/>сайт</span><span><i className="dot mint"/>HAPP</span></div></div><div className="analytics-bars">{analytics.days.map((day) => <div className="analytics-day" key={day.date}><div className="bar-stack" title={`${day.date}: бот ${day.bot_starts}, сайт ${day.site_visits}, HAPP ${day.happ_launches}`}><i className="bar bot" style={{ height: `${(day.bot_starts / max) * 100}%` }}/><i className="bar site" style={{ height: `${(day.site_visits / max) * 100}%` }}/><i className="bar happ" style={{ height: `${(day.happ_launches / max) * 100}%` }}/></div><small>{new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(new Date(`${day.date}T00:00:00Z`))}</small></div>)}</div></article>
+    <article className="panel analytics-detail"><div><p className="eyebrow">SUBSCRIPTIONS</p><h3>Открытия подписок</h3><strong>{analytics.subscription_opens}</strong><p>Загрузки подписки HAPP за последние 14 дней.</p></div><div><p className="eyebrow">STARTS</p><h3>Запуски бота</h3><strong>{analytics.bot_starts}</strong><p>Команда <code>/start</code> за последние 14 дней.</p></div></article>
+  </section>;
 }
 
 function Sources({ sources, onChanged, notify }: { sources: Source[]; onChanged: () => Promise<void>; notify: (message: string) => void }) {

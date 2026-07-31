@@ -1,6 +1,6 @@
 import base64
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
@@ -11,10 +11,11 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.crypto import decrypt
 from app.database import Base, SessionLocal, engine, get_db
-from app.models import AdminUser, AuditLog, Device, MetricSnapshot, Node, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceRun, TelegramUser
+from app.models import AdminUser, AnalyticsEvent, AuditLog, Device, MetricSnapshot, Node, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceRun, TelegramUser
 from app.schemas import (AdminCreate, AdminResponse, BotUserRequest, ChannelCreate, ChannelResponse, DashboardResponse,
                          DeviceCreate, DeviceResponse, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
-                         MetricSnapshotResponse, NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse)
+                         AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
+                         NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_github_url, refresh_source
 from app.services.parser import classify_network_profile, display_region, parse_config, transport_key, with_display_name
@@ -56,6 +57,10 @@ app.add_middleware(
 def audit(db: Session, action: str, admin_login: str | None = None, details: str | None = None) -> None:
     admin = db.scalar(select(AdminUser).where(AdminUser.login == admin_login)) if admin_login else None
     db.add(AuditLog(admin_id=admin.id if admin else None, action=action, details=details))
+
+
+def track_event(db: Session, event_type: str, user_id: UUID | None = None, device_id: UUID | None = None) -> None:
+    db.add(AnalyticsEvent(event_type=event_type, telegram_user_id=user_id, device_id=device_id))
 
 
 def source_response(source: Source) -> SourceResponse:
@@ -174,6 +179,31 @@ def metrics(request: Request, db: Session = Depends(get_db), limit: int = 36) ->
     return [MetricSnapshotResponse(active_nodes=item.active_nodes, quarantined_nodes=item.quarantined_nodes,
                                    average_ping_ms=item.average_ping_ms, check_success_rate=item.check_success_rate,
                                    created_at=item.created_at) for item in reversed(items)]
+
+
+@app.get("/admin/analytics", response_model=AnalyticsResponse)
+def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -> AnalyticsResponse:
+    require_admin(request)
+    days = max(7, min(days, 90))
+    start = datetime.now(timezone.utc) - timedelta(days=days - 1)
+    events = db.scalars(select(AnalyticsEvent).where(AnalyticsEvent.created_at >= start).order_by(AnalyticsEvent.created_at)).all()
+    points = {str((start + timedelta(days=offset)).date()): {"bot_starts": 0, "site_visits": 0, "happ_launches": 0, "vpn_issued": 0, "subscription_opens": 0} for offset in range(days)}
+    event_fields = {"bot_start": "bot_starts", "site_visit": "site_visits", "happ_launch": "happ_launches", "vpn_issued": "vpn_issued", "subscription_open": "subscription_opens"}
+    for event in events:
+        key = str(event.created_at.date())
+        field = event_fields.get(event.event_type)
+        if key in points and field:
+            points[key][field] += 1
+    count = lambda name: sum(1 for event in events if event.event_type == name)
+    return AnalyticsResponse(
+        total_bot_users=db.scalar(select(func.count()).select_from(TelegramUser)) or 0,
+        bot_starts=count("bot_start"),
+        unique_site_visitors=len({event.device_id for event in events if event.event_type == "site_visit" and event.device_id is not None}),
+        happ_launches=count("happ_launch"),
+        vpn_issued=count("vpn_issued"),
+        subscription_opens=count("subscription_open"),
+        days=[AnalyticsDayResponse(date=date, **values) for date, values in points.items()],
+    )
 
 
 @app.get("/admin/administrators", response_model=list[ManagedAdminResponse])
@@ -351,6 +381,26 @@ def ensure_bot_user(payload: BotUserRequest, db: Session = Depends(get_db)) -> d
     return {"id": str(user.id), "telegram_id": user.telegram_id, "blocked": user.is_blocked}
 
 
+@app.post("/internal/users/{telegram_id}/events", dependencies=[Depends(require_internal)])
+def bot_event(telegram_id: int, payload: InternalEventPayload, db: Session = Depends(get_db)) -> dict:
+    user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    track_event(db, payload.event_type, user_id=user.id)
+    db.commit()
+    return {"status": "recorded"}
+
+
+@app.post("/events/landing")
+def landing_event(payload: LandingEventPayload, db: Session = Depends(get_db)) -> dict:
+    device = db.scalar(select(Device).where(Device.token_hash == hash_token(payload.token), Device.is_revoked.is_(False)))
+    if not device:
+        raise HTTPException(status_code=404, detail="Подписка не найдена")
+    track_event(db, payload.event_type, user_id=device.user_id, device_id=device.id)
+    db.commit()
+    return {"status": "recorded"}
+
+
 @app.post("/internal/users/{telegram_id}/access", dependencies=[Depends(require_internal)])
 async def bot_access(telegram_id: int, db: Session = Depends(get_db)) -> dict:
     user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
@@ -378,6 +428,7 @@ def bot_rotate_device(telegram_id: int, device_id: UUID, db: Session = Depends(g
     device.token_hash = token_hash
     device.token_hint = hint
     device.is_revoked = False
+    track_event(db, "vpn_issued", user_id=user.id, device_id=device.id)
     db.commit()
     return device_response(device, include_url=True, plain_token=token)
 
@@ -408,6 +459,8 @@ def bot_create_device(telegram_id: int, payload: DeviceCreate, db: Session = Dep
     token, token_hash, hint = generate_device_token()
     device = Device(user_id=user.id, slot=slot, label=payload.label, token_hash=token_hash, token_hint=hint)
     db.add(device)
+    db.flush()
+    track_event(db, "vpn_issued", user_id=user.id, device_id=device.id)
     db.commit()
     db.refresh(device)
     return device_response(device, include_url=True, plain_token=token)
@@ -421,6 +474,7 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
     user = db.get(TelegramUser, device.user_id)
     if not user or user.is_blocked or not await has_required_memberships(db, user):
         raise HTTPException(status_code=403, detail="Выполните условия доступа в Telegram-боте")
+    track_event(db, "subscription_open", user_id=user.id, device_id=device.id)
     policy = pool_policy(db)
     rows = db.execute(
         select(Node, Source)

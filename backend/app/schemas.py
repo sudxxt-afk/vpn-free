@@ -118,6 +118,34 @@ class MetricSnapshotResponse(BaseModel):
     created_at: datetime
 
 
+class LandingEventPayload(BaseModel):
+    token: str = Field(min_length=16, max_length=256)
+    event_type: str = Field(pattern="^(site_visit|happ_launch)$")
+
+
+class InternalEventPayload(BaseModel):
+    event_type: str = Field(pattern="^(bot_start|vpn_issued)$")
+
+
+class AnalyticsDayResponse(BaseModel):
+    date: str
+    bot_starts: int = 0
+    site_visits: int = 0
+    happ_launches: int = 0
+    vpn_issued: int = 0
+    subscription_opens: int = 0
+
+
+class AnalyticsResponse(BaseModel):
+    total_bot_users: int
+    bot_starts: int
+    unique_site_visitors: int
+    happ_launches: int
+    vpn_issued: int
+    subscription_opens: int
+    days: list[AnalyticsDayResponse]
+
+
 class BotUserRequest(BaseModel):
     telegram_id: int
     username: str | None = None
