@@ -493,6 +493,10 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
         counts[key] = counts.get(key, 0) + 1
         selected.append((node, source, profile))
 
+    # Keep the two dedicated auto routes first, then favour LTE-labelled nodes
+    # in HAPP so mobile users see the most relevant locations immediately.
+    selected.sort(key=lambda item: (0 if item[2] == "mobile" else 1, -item[0].score))
+
     # HAPP sees these as the first two ordinary servers. Their endpoint changes on the
     # next subscription refresh when the measured best candidate changes.
     payload_lines: list[str] = []
@@ -502,8 +506,7 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
         if candidate:
             node, _source = candidate
             auto_ids.add(node.id)
-            flag, _region = display_region(decrypt(node.config_ciphertext), node.host)
-            payload_lines.append(with_display_name(decrypt(node.config_ciphertext), f"{flag} {label}"))
+            payload_lines.append(with_display_name(decrypt(node.config_ciphertext), f"🇪🇺 {label}"))
     for node, source, profile in selected:
         if node.id in auto_ids:
             continue
