@@ -100,6 +100,10 @@ def refresh_source(db: Session, source: Source) -> SourceRun:
 
     seen = {config.fingerprint for config in configs}
     existing = {node.fingerprint: node for node in db.scalars(select(Node).where(Node.source_id == source.id)).all()}
+    # A public list often repeats the same share links from another source.
+    # Fingerprints are global, so skip such duplicates instead of failing the
+    # entire import with a database uniqueness error.
+    known_fingerprints = set(db.scalars(select(Node.fingerprint).where(Node.fingerprint.in_(seen))).all()) if seen else set()
     now = datetime.now(timezone.utc)
     for config in configs:
         node = existing.get(config.fingerprint)
@@ -108,6 +112,8 @@ def refresh_source(db: Session, source: Source) -> SourceRun:
             if node.state == NodeState.REMOVED:
                 node.state = NodeState.CANDIDATE
                 node.removed_at = None
+            continue
+        if config.fingerprint in known_fingerprints:
             continue
         db.add(Node(
             source_id=source.id,
@@ -131,4 +137,3 @@ def refresh_source(db: Session, source: Source) -> SourceRun:
     _finish(run, status="processed", found=len(configs), published=len(configs))
     db.commit()
     return run
-

@@ -31,6 +31,7 @@ def bootstrap() -> None:
             # Telegram IDs exceed signed 32-bit integers. Keep existing local installs usable.
             db.execute(text("ALTER TABLE telegram_users ALTER COLUMN telegram_id TYPE BIGINT"))
             db.execute(text("ALTER TABLE required_channels ALTER COLUMN chat_id TYPE BIGINT"))
+            db.execute(text("ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_blocked_at TIMESTAMPTZ"))
             db.commit()
         exists = db.scalar(select(AdminUser).where(AdminUser.login == settings.initial_admin_login))
         if not exists:
@@ -197,6 +198,8 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
     count = lambda name: sum(1 for event in events if event.event_type == name)
     return AnalyticsResponse(
         total_bot_users=db.scalar(select(func.count()).select_from(TelegramUser)) or 0,
+        new_bot_users=db.scalar(select(func.count()).select_from(TelegramUser).where(TelegramUser.created_at >= start)) or 0,
+        known_bot_blocks=db.scalar(select(func.count()).select_from(TelegramUser).where(TelegramUser.bot_blocked_at.is_not(None))) or 0,
         bot_starts=count("bot_start"),
         unique_site_visitors=len({event.device_id for event in events if event.event_type == "site_visit" and event.device_id is not None}),
         happ_launches=count("happ_launch"),
@@ -375,10 +378,21 @@ def ensure_bot_user(payload: BotUserRequest, db: Session = Depends(get_db)) -> d
         db.add(user)
         db.commit()
         db.refresh(user)
-    elif payload.username != user.username:
+    else:
         user.username = payload.username
+        user.bot_blocked_at = None
         db.commit()
     return {"id": str(user.id), "telegram_id": user.telegram_id, "blocked": user.is_blocked}
+
+
+@app.post("/internal/users/{telegram_id}/bot-blocked", dependencies=[Depends(require_internal)])
+def mark_bot_blocked(telegram_id: int, db: Session = Depends(get_db)) -> dict:
+    user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
+    if not user:
+        return {"status": "ignored"}
+    user.bot_blocked_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"status": "recorded"}
 
 
 @app.post("/internal/users/{telegram_id}/events", dependencies=[Depends(require_internal)])

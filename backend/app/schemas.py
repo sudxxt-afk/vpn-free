@@ -138,6 +138,8 @@ class AnalyticsDayResponse(BaseModel):
 
 class AnalyticsResponse(BaseModel):
     total_bot_users: int
+    new_bot_users: int
+    known_bot_blocks: int
     bot_starts: int
     unique_site_visitors: int
     happ_launches: int

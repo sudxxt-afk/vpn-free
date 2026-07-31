@@ -86,6 +86,7 @@ export function Connect() {
       <div className="zaza-os-block"><span>ТВОЁ УСТРОЙСТВО</span><div className="zaza-os-switch">{(["android", "ios", "desktop"] as Exclude<Platform, "other">[]).map(item => <button key={item} className={platform === item ? "active" : ""} onClick={() => setPlatform(item)}>{item === "android" ? "🤖 Android" : item === "ios" ? "🍏 iPhone" : "💻 Компьютер"}</button>)}</div><small>Выбрано: {platformLabel}</small></div>
       <div className="zaza-import-actions"><button className="zaza-open-happ" onClick={launchHapp}>🚀 ОТКРЫТЬ HAPP И ДОБАВИТЬ</button><button className="zaza-copy-link" onClick={copy}>{copied ? "✓ ССЫЛКА СКОПИРОВАНА" : "▣ СКОПИРОВАТЬ ССЫЛКУ"}</button></div>
       <p className="zaza-explainer">Нажатие откроет HAPP и передаст туда твою личную подписку. Если HAPP ещё не установлен — сначала скачай его, затем вернись сюда и нажми кнопку снова.</p>
+      <a className="zaza-download" href="https://t.me/zazaaVPN_bot" target="_blank" rel="noreferrer">✈️ ОТКРЫТЬ ZAZA VPN В TELEGRAM</a>
       <a className="zaza-download" href="https://www.happ.uno/" target="_blank" rel="noreferrer">↓ СКАЧАТЬ HAPP ДЛЯ {platformLabel.toUpperCase()}</a>
     </section>
 

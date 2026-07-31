@@ -7,8 +7,9 @@ import httpx
 import qrcode
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.config import get_settings
 
@@ -16,6 +17,22 @@ logging.basicConfig(level=logging.INFO)
 settings = get_settings()
 dp = Dispatcher()
 support_waiting: set[int] = set()
+
+
+@dp.error()
+async def record_telegram_block(event: ErrorEvent) -> bool:
+    """Telegram does not provide a list of blockers; record a confirmed send failure."""
+    if not isinstance(event.exception, TelegramForbiddenError):
+        return False
+    update = event.update
+    origin = update.message or update.callback_query
+    user = origin.from_user if origin else None
+    if user:
+        try:
+            await api("POST", f"/internal/users/{user.id}/bot-blocked")
+        except Exception:
+            logging.exception("Unable to record Telegram bot block")
+    return True
 
 
 def menu() -> InlineKeyboardMarkup:
