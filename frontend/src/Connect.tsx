@@ -38,7 +38,11 @@ export function Connect() {
   const [copied, setCopied] = useState(false);
   const [platform, setPlatform] = useState<Platform>(detectPlatform);
   const token = new URLSearchParams(window.location.search).get("token") || "";
-  const subscription = token ? `${API.replace(/\/$/, "")}/s/${encodeURIComponent(token)}` : "";
+  // VITE_API_URL is deliberately relative (/api) in production so browser API
+  // calls stay same-origin. HAPP, however, receives no browser origin, so its
+  // subscription URL must be absolute.
+  const apiBase = useMemo(() => new URL(API, window.location.origin).toString().replace(/\/$/, ""), []);
+  const subscription = token ? `${apiBase}/s/${encodeURIComponent(token)}` : "";
   // HAPP's standard deeplink accepts the subscription URL itself after /add/.
   // Passing a Base64 string makes current HAPP builds treat it as an invalid URL.
   const happLink = useMemo(() => subscription ? `happ://add/${subscription}` : "", [subscription]);
@@ -46,14 +50,14 @@ export function Connect() {
 
   const track = (eventType: "site_visit" | "happ_launch") => {
     if (!token) return;
-    void fetch(`${API.replace(/\/$/, "")}/events/landing`, {
+    void fetch(`${apiBase}/events/landing`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token, event_type: eventType }),
     }).catch(() => undefined);
   };
 
-  useEffect(() => { track("site_visit"); }, [token]);
+  useEffect(() => { track("site_visit"); }, [token, apiBase]);
 
   const copy = async () => {
     if (!subscription) return;
