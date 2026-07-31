@@ -74,8 +74,8 @@ async def get_partner_access(db: Session, user: TelegramUser, target_devices: in
             body = response.json()
             response.raise_for_status()
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("SubGram request failed, allowing access: %s", exc)
-        return PartnerDecision(True, tier=tier)
+        logger.warning("SubGram request failed, denying access: %s", exc)
+        return PartnerDecision(False, tier=tier, reason="Партнёрская проверка временно недоступна. Попробуйте позже")
 
     response_status = str(body.get("status", "error"))
     if response_status == "ok":
@@ -84,8 +84,9 @@ async def get_partner_access(db: Session, user: TelegramUser, target_devices: in
         db.commit()
         return PartnerDecision(True, tier=tier)
     if response_status != "warning":
-        logger.warning("SubGram returned %s, allowing access: %s", response_status, body)
-        return PartnerDecision(True, tier=tier)
+        message = str(body.get("message") or "Партнёрская проверка пока недоступна")
+        logger.warning("SubGram returned %s, denying access: %s", response_status, message)
+        return PartnerDecision(False, tier=tier, reason=message)
 
     sponsors: list[Sponsor] = []
     for item in body.get("additional", {}).get("sponsors", []):
