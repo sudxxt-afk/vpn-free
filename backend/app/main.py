@@ -1,4 +1,3 @@
-import base64
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -513,5 +512,7 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
     payload = "\n".join(payload_lines)
     device.last_used_at = datetime.now(timezone.utc)
     db.commit()
-    encoded = base64.b64encode(payload.encode()).decode()
-    return Response(content=encoded, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": "inline; filename=subscription.txt"})
+    # HAPP's ordinary URL subscriptions expect newline-separated share links,
+    # not a Base64 envelope. Returning raw links also makes diagnostics in the
+    # client much clearer when one source contains a malformed configuration.
+    return Response(content=payload, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": "inline; filename=subscription.txt"})
