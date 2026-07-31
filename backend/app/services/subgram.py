@@ -60,8 +60,8 @@ async def get_partner_access(db: Session, user: TelegramUser, target_devices: in
         return PartnerDecision(True, tier=tier)
 
     settings = get_settings()
-    if not settings.subgram_api_key:
-        logger.warning("SubGram is not configured; allowing access without partner gate")
+    if not settings.subgram_enabled or not settings.subgram_api_key:
+        logger.info("SubGram gate is disabled; allowing access without partner gate")
         return PartnerDecision(True, tier=tier)
 
     action = "subscribe" if gate.pending_tier == tier else "newtask"

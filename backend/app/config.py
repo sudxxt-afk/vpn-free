@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     membership_check_hours: int = 12
     subgram_api_key: str = ""
     subgram_base_url: str = "https://api.subgram.org"
+    subgram_enabled: bool = False
 
     @property
     def admin_ids(self) -> set[int]:
