@@ -502,13 +502,14 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
         if candidate:
             node, _source = candidate
             auto_ids.add(node.id)
-            payload_lines.append(with_display_name(decrypt(node.config_ciphertext), label))
+            flag, _region = display_region(decrypt(node.config_ciphertext), node.host)
+            payload_lines.append(with_display_name(decrypt(node.config_ciphertext), f"{flag} {label}"))
     for node, source, profile in selected:
         if node.id in auto_ids:
             continue
         emoji = "📡 LTE" if profile == "mobile" else "📶 Wi‑Fi"
-        _flag, region = display_region(decrypt(node.config_ciphertext), node.host)
-        payload_lines.append(with_display_name(decrypt(node.config_ciphertext), f"{emoji} · {region}"))
+        flag, region = display_region(decrypt(node.config_ciphertext), node.host)
+        payload_lines.append(with_display_name(decrypt(node.config_ciphertext), f"{flag} {emoji} · {region}"))
     payload = "\n".join(payload_lines)
     device.last_used_at = datetime.now(timezone.utc)
     db.commit()
