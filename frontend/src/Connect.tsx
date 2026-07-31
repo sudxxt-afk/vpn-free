@@ -39,7 +39,9 @@ export function Connect() {
   const [platform, setPlatform] = useState<Platform>(detectPlatform);
   const token = new URLSearchParams(window.location.search).get("token") || "";
   const subscription = token ? `${API.replace(/\/$/, "")}/s/${encodeURIComponent(token)}` : "";
-  const happLink = useMemo(() => subscription ? `happ://add/${window.btoa(subscription)}` : "", [subscription]);
+  // HAPP's standard deeplink accepts the subscription URL itself after /add/.
+  // Passing a Base64 string makes current HAPP builds treat it as an invalid URL.
+  const happLink = useMemo(() => subscription ? `happ://add/${subscription}` : "", [subscription]);
   const platformLabel = platform === "other" ? "вашего устройства" : platformNames[platform];
 
   const track = (eventType: "site_visit" | "happ_launch") => {
