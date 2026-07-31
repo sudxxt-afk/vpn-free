@@ -19,6 +19,7 @@ from app.security import create_access_token, generate_device_token, hash_passwo
 from app.services.github import SourceError, normalize_github_url, refresh_source
 from app.services.parser import classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.telegram import has_required_memberships, validate_bot_admin
+from app.services.subgram import get_partner_access
 
 settings = get_settings()
 
@@ -43,7 +44,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="VPN Control Plane", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Zaza VPN", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_origin],
@@ -401,12 +402,20 @@ def landing_event(payload: LandingEventPayload, db: Session = Depends(get_db)) -
 
 
 @app.post("/internal/users/{telegram_id}/access", dependencies=[Depends(require_internal)])
-async def bot_access(telegram_id: int, db: Session = Depends(get_db)) -> dict:
+async def bot_access(telegram_id: int, target_devices: int = 1, db: Session = Depends(get_db)) -> dict:
     user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
     if not user or user.is_blocked:
         return {"allowed": False, "reason": "Пользователь заблокирован"}
     allowed = await has_required_memberships(db, user)
-    return {"allowed": allowed, "reason": None if allowed else "Подпишитесь на обязательные каналы"}
+    if not allowed:
+        return {"allowed": False, "reason": "Подпишитесь на обязательные каналы", "sponsors": []}
+    decision = await get_partner_access(db, user, target_devices)
+    return {
+        "allowed": decision.allowed,
+        "reason": decision.reason,
+        "tier": decision.tier,
+        "sponsors": [{"link": item.link, "title": item.title, "button_text": item.button_text} for item in decision.sponsors],
+    }
 
 
 @app.get("/internal/users/{telegram_id}/devices", dependencies=[Depends(require_internal)], response_model=list[DeviceResponse])
@@ -446,15 +455,20 @@ def bot_status(db: Session = Depends(get_db)) -> dict:
 
 
 @app.post("/internal/users/{telegram_id}/devices", dependencies=[Depends(require_internal)], response_model=DeviceResponse)
-def bot_create_device(telegram_id: int, payload: DeviceCreate, db: Session = Depends(get_db)) -> DeviceResponse:
+async def bot_create_device(telegram_id: int, payload: DeviceCreate, db: Session = Depends(get_db)) -> DeviceResponse:
     user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     existing = db.scalars(select(Device).where(Device.user_id == user.id, Device.is_revoked.is_(False))).all()
-    if len(existing) >= 2:
-        raise HTTPException(status_code=409, detail="Доступны только две ячейки устройств")
+    if len(existing) >= 8:
+        raise HTTPException(status_code=409, detail="Доступно не более 8 устройств")
+    if not await has_required_memberships(db, user):
+        raise HTTPException(status_code=403, detail="Подпишитесь на обязательные каналы")
+    partner = await get_partner_access(db, user, len(existing) + 1)
+    if not partner.allowed:
+        raise HTTPException(status_code=403, detail="Сначала выполните условия партнёрского доступа")
     occupied = {item.slot for item in existing}
-    slot = next(slot for slot in (1, 2) if slot not in occupied)
+    slot = next(slot for slot in range(1, 9) if slot not in occupied)
     token, token_hash, hint = generate_device_token()
     device = Device(user_id=user.id, slot=slot, label=payload.label, token_hash=token_hash, token_hint=hint)
     db.add(device)

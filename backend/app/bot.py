@@ -45,9 +45,27 @@ async def ensure_user(message: Message | CallbackQuery) -> int:
     return user.id
 
 
-async def allowed(telegram_id: int) -> tuple[bool, str | None]:
-    result = await api("POST", f"/internal/users/{telegram_id}/access")
-    return result["allowed"], result.get("reason")
+async def allowed(telegram_id: int, target_devices: int = 1) -> dict:
+    return await api("POST", f"/internal/users/{telegram_id}/access", params={"target_devices": target_devices})
+
+
+async def show_access_gate(callback: CallbackQuery, access: dict, target_devices: int) -> None:
+    sponsors = access.get("sponsors") or []
+    if sponsors:
+        buttons = [[InlineKeyboardButton(text=f"➕ {item['button_text']}", url=item["link"])] for item in sponsors]
+        buttons.append([InlineKeyboardButton(text="✅ Проверить подписки", callback_data=f"vpn:check:{target_devices}")])
+        await callback.message.answer(
+            f"🔒 <b>Нужны подписки для доступа</b>\n\n{access.get('reason') or 'Подпишитесь на партнёрские каналы'}.\n"
+            "Откройте все каналы кнопками ниже, затем нажмите «Проверить подписки».",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+        return
+    channels = await api("GET", "/internal/channels")
+    lines = ["🔒 Для доступа подпишитесь на обязательные каналы:"]
+    for channel in channels:
+        link = f"https://t.me/{channel['username'].lstrip('@')}" if channel.get("username") else str(channel["chat_id"])
+        lines.append(f"• {channel['title']} — {link}")
+    await callback.message.answer("\n".join(lines) if channels else (access.get("reason") or "Доступ пока недоступен"), reply_markup=menu())
 
 
 async def send_subscription(target: Message | CallbackQuery, device: dict) -> None:
@@ -85,21 +103,16 @@ async def start(message: Message) -> None:
 @dp.callback_query(F.data == "vpn:get")
 async def access_flow(callback: CallbackQuery) -> None:
     telegram_id = await ensure_user(callback)
-    is_allowed, reason = await allowed(telegram_id)
-    if not is_allowed:
-        channels = await api("GET", "/internal/channels")
-        lines = ["Для доступа подпишитесь на все обязательные каналы:"]
-        for channel in channels:
-            link = f"https://t.me/{channel['username'].lstrip('@')}" if channel.get("username") else str(channel["chat_id"])
-            lines.append(f"• {channel['title']} — {link}")
-        lines.append("\nПосле подписки нажмите «Проверить каналы».")
-        await callback.message.answer("\n".join(lines) if channels else (reason or "Доступ пока недоступен"), reply_markup=menu())
+    devices = await api("GET", f"/internal/users/{telegram_id}/devices")
+    if len(devices) >= 8:
+        buttons = [[InlineKeyboardButton(text=f"♻️ Перевыпустить: {item['label']}", callback_data=f"vpn:rotate:{item['id']}")] for item in devices]
+        await callback.message.answer("У вас уже 8 устройств. Выберите устройство для перевыпуска ссылки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
         await callback.answer()
         return
-    devices = await api("GET", f"/internal/users/{telegram_id}/devices")
-    if len(devices) >= 2:
-        buttons = [[InlineKeyboardButton(text=f"♻️ Перевыпустить: {item['label']}", callback_data=f"vpn:rotate:{item['id']}")] for item in devices]
-        await callback.message.answer("У вас уже две ячейки устройств. Выберите, для какой перевыпустить ссылку:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    target_devices = len(devices) + 1
+    access = await allowed(telegram_id, target_devices)
+    if not access["allowed"]:
+        await show_access_gate(callback, access, target_devices)
         await callback.answer()
         return
     device = await api("POST", f"/internal/users/{telegram_id}/devices", json={"label": f"Устройство {len(devices) + 1}"})
@@ -113,11 +126,16 @@ async def legacy_menu_buttons(callback: CallbackQuery) -> None:
     await access_flow(callback)
 
 
+@dp.callback_query(F.data.startswith("vpn:check:"))
+async def check_partner_gate(callback: CallbackQuery) -> None:
+    await access_flow(callback)
+
+
 @dp.callback_query(F.data.startswith("vpn:rotate:"))
 async def rotate(callback: CallbackQuery) -> None:
     telegram_id = await ensure_user(callback)
-    is_allowed, _ = await allowed(telegram_id)
-    if not is_allowed:
+    access = await allowed(telegram_id)
+    if not access["allowed"]:
         await callback.answer("Сначала выполните условия доступа", show_alert=True)
         return
     device_id = callback.data.rsplit(":", 1)[1]
@@ -158,7 +176,7 @@ async def support_message(message: Message) -> None:
         await message.answer("Поддержка пока не настроена. Попробуйте обновить подписку или обратитесь к владельцу бота.", reply_markup=menu())
         return
     sender = f"@{message.from_user.username}" if message.from_user.username else str(message.from_user.id)
-    text = f"📨 Поддержка VECTOR\nОт: {sender}\nID: {message.from_user.id}\n\n{message.text}"
+    text = f"📨 Поддержка Zaza VPN\nОт: {sender}\nID: {message.from_user.id}\n\n{message.text}"
     bot = message.bot
     if not bot:
         await message.answer("Не удалось передать обращение. Попробуйте ещё раз позже.", reply_markup=menu())

@@ -16,7 +16,6 @@ async def notify_admins(message: str) -> None:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             for chat_id in settings.admin_ids:
-                await client.post(endpoint, json={"chat_id": chat_id, "text": f"⚠️ VECTOR alert\n{message}"})
+                await client.post(endpoint, json={"chat_id": chat_id, "text": f"⚠️ Zaza VPN alert\n{message}"})
     except httpx.HTTPError as exc:
         logger.warning("Unable to deliver Telegram alert: %s", exc)
-
