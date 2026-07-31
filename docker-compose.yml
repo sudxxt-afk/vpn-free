@@ -14,6 +14,7 @@ services:
       retries: 10
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -22,6 +23,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
   api:
     build: ./backend
@@ -30,28 +32,26 @@ services:
     ports:
       - "127.0.0.1:8188:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - postgres
+      - redis
+    restart: unless-stopped
 
   worker:
     build: ./backend
     env_file: .env
     command: python -m app.worker
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - postgres
+      - redis
+    restart: unless-stopped
 
   bot:
     build: ./backend
     env_file: .env
     command: python -m app.bot
     depends_on:
-      api:
-        condition: service_started
+      - api
+    restart: unless-stopped
 
   admin:
     build:
@@ -61,8 +61,8 @@ services:
     ports:
       - "127.0.0.1:5173:80"
     depends_on:
-      api:
-        condition: service_started
+      - api
+    restart: unless-stopped
 
 volumes:
   postgres_data:
