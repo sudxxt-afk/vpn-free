@@ -8,7 +8,7 @@ import httpx
 import qrcode
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup,
                            LabeledPrice, Message, PreCheckoutQuery)
@@ -67,6 +67,19 @@ def ticket_text(ticket: dict) -> str:
     return "\n".join(lines)
 
 
+def ticket_list_markup(tickets: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for ticket in tickets:
+        status_icon = {"new": "🆕", "answered": "✉️", "closed": "✅"}.get(ticket.get("status"), "•")
+        sender = f"@{ticket['username']}" if ticket.get("username") else str(ticket.get("telegram_id") or "пользователь")
+        rows.append([InlineKeyboardButton(
+            text=f"{status_icon} {sender} · {ticket['id'][:8]}",
+            callback_data=f"adm:ticket:{ticket['id']}",
+        )])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def broadcast_markup(draft: dict) -> InlineKeyboardMarkup | None:
     buttons = draft.get("buttons") or []
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -95,6 +108,36 @@ def telegram_message_html(message: Message, *, caption: bool = False) -> str:
         return text
     entities = getattr(message, "caption_entities", None) if caption else getattr(message, "entities", None)
     return html_decoration.unparse(text, entities)
+
+
+async def edit_callback_screen(
+    callback: CallbackQuery,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    disable_web_page_preview: bool = True,
+) -> None:
+    """Replace an inline-navigation screen without losing actions on stale/media messages."""
+    message = callback.message
+    if not getattr(message, "text", None):
+        await message.answer(text, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview)
+        return
+    try:
+        await message.edit_text(text, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview)
+    except TelegramBadRequest as exc:
+        detail = str(exc).lower()
+        if "message is not modified" in detail:
+            return
+        if any(fragment in detail for fragment in (
+            "message can't be edited",
+            "message to edit not found",
+            "message_id_invalid",
+            "message is too old",
+        )):
+            logging.info("Cannot edit navigation screen; sending a replacement: %s", exc)
+            await message.answer(text, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview)
+            return
+        raise
 
 
 def broadcast_segment_markup() -> InlineKeyboardMarkup:
@@ -141,10 +184,11 @@ async def show_broadcast_preview(target: Message | CallbackQuery, draft: dict) -
             await message.answer_photo(draft["photo_file_id"], caption=draft.get("text_html") or None, reply_markup=markup)
     else:
         await message.answer(draft["text_html"], disable_web_page_preview=True, reply_markup=markup)
-    await message.answer(
-        f"Сегмент: <b>{draft['segment']}</b>\nПроверьте сообщение выше и подтвердите рассылку.",
-        reply_markup=broadcast_preview_markup(),
-    )
+    confirmation_text = f"Сегмент: <b>{draft['segment']}</b>\nПроверьте сообщение выше и подтвердите рассылку."
+    if isinstance(target, CallbackQuery):
+        await edit_callback_screen(target, confirmation_text, reply_markup=broadcast_preview_markup())
+    else:
+        await message.answer(confirmation_text, reply_markup=broadcast_preview_markup())
 
 
 @dp.error()
@@ -204,7 +248,8 @@ async def show_access_gate(callback: CallbackQuery, access: dict, target_devices
     if sponsors:
         buttons = [[InlineKeyboardButton(text=f"➕ {item['button_text']}", url=item["link"])] for item in sponsors]
         buttons.append([InlineKeyboardButton(text="✅ Проверить подписки", callback_data=f"vpn:check:{target_devices}")])
-        await callback.message.answer(
+        await edit_callback_screen(
+            callback,
             f"🔒 <b>Нужны подписки для доступа</b>\n\n{access.get('reason') or 'Подпишитесь на партнёрские каналы'}.\n"
             "Откройте все каналы кнопками ниже, затем нажмите «Проверить подписки».",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -215,7 +260,11 @@ async def show_access_gate(callback: CallbackQuery, access: dict, target_devices
     for channel in channels:
         link = f"https://t.me/{channel['username'].lstrip('@')}" if channel.get("username") else str(channel["chat_id"])
         lines.append(f"• {channel['title']} — {link}")
-    await callback.message.answer("\n".join(lines) if channels else (access.get("reason") or "Доступ пока недоступен"), reply_markup=menu())
+    await edit_callback_screen(
+        callback,
+        "\n".join(lines) if channels else (access.get("reason") or "Доступ пока недоступен"),
+        reply_markup=menu(),
+    )
 
 
 async def send_subscription(target: Message | CallbackQuery, device: dict) -> None:
@@ -276,7 +325,7 @@ async def show_donation_home(target: Message | CallbackQuery) -> None:
     )
     markup = InlineKeyboardMarkup(inline_keyboard=rows)
     if isinstance(target, CallbackQuery):
-        await target.message.answer(text, reply_markup=markup)
+        await edit_callback_screen(target, text, reply_markup=markup)
         await target.answer()
     else:
         await target.answer(text, reply_markup=markup)
@@ -320,7 +369,7 @@ async def donation_home_callback(callback: CallbackQuery) -> None:
 
 @dp.callback_query(F.data == "donate:back")
 async def donation_back_callback(callback: CallbackQuery) -> None:
-    await callback.message.answer("Главное меню", reply_markup=menu())
+    await edit_callback_screen(callback, "Главное меню", reply_markup=menu())
     await callback.answer()
 
 
@@ -330,7 +379,7 @@ async def donation_stars_callback(callback: CallbackQuery) -> None:
     value = callback.data.rsplit(":", 1)[-1]
     if value == "custom":
         donation_custom_waiting.add(telegram_id)
-        await callback.message.answer("Введите сумму от 1 до 10 000 Stars одним числом. Для отмены отправьте /cancel.")
+        await edit_callback_screen(callback, "Введите сумму от 1 до 10 000 Stars одним числом. Для отмены отправьте /cancel.")
         await callback.answer()
         return
     try:
@@ -349,7 +398,11 @@ async def donation_ton_callback(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="💎 Открыть TON-донат", url=session["url"])],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="donate:home")],
         ])
-        await callback.message.answer("Подключите TON-кошелёк и подтвердите перевод. Zaza VPN никогда не запрашивает seed-фразу или приватный ключ.", reply_markup=keyboard)
+        await edit_callback_screen(
+            callback,
+            "Подключите TON-кошелёк и подтвердите перевод. Zaza VPN никогда не запрашивает seed-фразу или приватный ключ.",
+            reply_markup=keyboard,
+        )
         await callback.answer()
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -400,7 +453,7 @@ async def show_admin_home(target: Message | CallbackQuery) -> None:
             f"Новые обращения: <b>{info['new_tickets']}</b>\n"
             f"Активные рассылки: <b>{info['active_broadcasts']}</b>")
     if isinstance(target, CallbackQuery):
-        await target.message.answer(text, reply_markup=admin_menu())
+        await edit_callback_screen(target, text, reply_markup=admin_menu())
         await target.answer()
     else:
         await target.answer(text, reply_markup=admin_menu())
@@ -430,9 +483,29 @@ async def admin_tickets_callback(callback: CallbackQuery) -> None:
     try:
         tickets = await api("GET", f"/internal/admin/{callback.from_user.id}/tickets", params={"limit": 10})
         if not tickets:
-            await callback.message.answer("📭 Обращений пока нет.", reply_markup=admin_menu())
-        for ticket in tickets:
-            await callback.message.answer(ticket_text(ticket), reply_markup=ticket_keyboard(ticket["id"], ticket["status"]))
+            await edit_callback_screen(callback, "📭 Обращений пока нет.", reply_markup=admin_menu())
+        else:
+            await edit_callback_screen(
+                callback,
+                "📨 <b>Обращения</b>\nВыберите обращение, чтобы посмотреть историю и ответить.",
+                reply_markup=ticket_list_markup(tickets),
+            )
+        await callback.answer()
+    except Exception as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("adm:ticket:"))
+async def admin_ticket_detail(callback: CallbackQuery) -> None:
+    assert callback.from_user and callback.data
+    ticket_id = callback.data.rsplit(":", 1)[1]
+    try:
+        tickets = await api("GET", f"/internal/admin/{callback.from_user.id}/tickets", params={"limit": 50})
+        ticket = next((item for item in tickets if item["id"] == ticket_id), None)
+        if not ticket:
+            await callback.answer("Обращение уже недоступно", show_alert=True)
+            return
+        await edit_callback_screen(callback, ticket_text(ticket), reply_markup=ticket_keyboard(ticket["id"], ticket["status"]))
         await callback.answer()
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -445,7 +518,13 @@ async def admin_ticket_reply(callback: CallbackQuery) -> None:
     try:
         await api("POST", f"/internal/admin/{callback.from_user.id}/tickets/{ticket_id}/claim")
         admin_reply_waiting[callback.from_user.id] = ticket_id
-        await callback.message.answer("✍️ Напишите ответ одним текстовым сообщением. /cancel — отмена.")
+        await edit_callback_screen(
+            callback,
+            "✍️ Напишите ответ одним текстовым сообщением. /cancel — отмена.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ К обращению", callback_data=f"adm:ticket:{ticket_id}")],
+            ]),
+        )
         await callback.answer("Обращение взято в работу")
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -457,7 +536,7 @@ async def admin_ticket_status(callback: CallbackQuery) -> None:
     _, action, ticket_id = callback.data.split(":")
     try:
         ticket = await api("POST", f"/internal/admin/{callback.from_user.id}/tickets/{ticket_id}/{action}")
-        await callback.message.answer(ticket_text(ticket), reply_markup=ticket_keyboard(ticket["id"], ticket["status"]))
+        await edit_callback_screen(callback, ticket_text(ticket), reply_markup=ticket_keyboard(ticket["id"], ticket["status"]))
         await callback.answer("Статус обновлён")
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -469,7 +548,7 @@ async def admin_users_callback(callback: CallbackQuery) -> None:
     try:
         await api("GET", f"/internal/admin/{callback.from_user.id}/dashboard")
         admin_user_search_waiting.add(callback.from_user.id)
-        await callback.message.answer("🔎 Пришлите Telegram ID или @username пользователя. /cancel — отмена.")
+        await edit_callback_screen(callback, "🔎 Пришлите Telegram ID или @username пользователя. /cancel — отмена.")
         await callback.answer()
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -483,7 +562,11 @@ async def admin_block_confirm(callback: CallbackQuery) -> None:
         [InlineKeyboardButton(text="Подтвердить", callback_data=f"adm:block:{user_id}"),
          InlineKeyboardButton(text="Отмена", callback_data="adm:home")]
     ])
-    await callback.message.answer("Изменить блокировку пользователя? Его текущие подписки перестанут или снова начнут выдаваться.", reply_markup=keyboard)
+    await edit_callback_screen(
+        callback,
+        "Изменить блокировку пользователя? Его текущие подписки перестанут или снова начнут выдаваться.",
+        reply_markup=keyboard,
+    )
     await callback.answer()
 
 
@@ -493,6 +576,11 @@ async def admin_block_user(callback: CallbackQuery) -> None:
     user_id = callback.data.rsplit(":", 1)[1]
     try:
         result = await api("POST", f"/internal/admin/{callback.from_user.id}/users/{user_id}/block")
+        await edit_callback_screen(
+            callback,
+            "✅ Пользователь заблокирован." if result["is_blocked"] else "✅ Пользователь разблокирован.",
+            reply_markup=admin_menu(),
+        )
         await callback.answer("Пользователь заблокирован" if result["is_blocked"] else "Пользователь разблокирован", show_alert=True)
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -505,7 +593,11 @@ async def admin_sources_callback(callback: CallbackQuery) -> None:
         sources = await api("GET", f"/internal/admin/{callback.from_user.id}/sources")
         rows = [[InlineKeyboardButton(text=f"{'🔴' if item['last_error'] else '🟢'} {item['name']}", callback_data=f"adm:source:{item['id']}")] for item in sources[:12]]
         rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:home")])
-        await callback.message.answer("🛰 <b>Источники</b>\nВыберите источник для ручного обновления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await edit_callback_screen(
+            callback,
+            "🛰 <b>Источники</b>\nВыберите источник для ручного обновления:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
         await callback.answer()
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -519,7 +611,7 @@ async def admin_source_confirm(callback: CallbackQuery) -> None:
         [InlineKeyboardButton(text="Запустить обновление", callback_data=f"adm:refresh:{source_id}")],
         [InlineKeyboardButton(text="Отмена", callback_data="adm:sources")],
     ])
-    await callback.message.answer("Обновить этот источник сейчас? Операция может занять несколько секунд.", reply_markup=keyboard)
+    await edit_callback_screen(callback, "Обновить этот источник сейчас? Операция может занять несколько секунд.", reply_markup=keyboard)
     await callback.answer()
 
 
@@ -530,29 +622,37 @@ async def admin_source_refresh(callback: CallbackQuery) -> None:
     await callback.answer("Обновляю…")
     try:
         result = await api("POST", f"/internal/admin/{callback.from_user.id}/sources/{source_id}/refresh")
-        await callback.message.answer(f"✅ <b>{escape(result['name'])}</b>\nСтатус: {result['status']}\nНайдено: {result['found_count']}\nОпубликовано: {result['published_count']}\n{escape(result.get('message') or '')}", reply_markup=admin_menu())
+        await edit_callback_screen(
+            callback,
+            f"✅ <b>{escape(result['name'])}</b>\nСтатус: {result['status']}\nНайдено: {result['found_count']}\nОпубликовано: {result['published_count']}\n{escape(result.get('message') or '')}",
+            reply_markup=admin_menu(),
+        )
     except Exception as exc:
-        await callback.message.answer(f"❌ {escape(str(exc))}", reply_markup=admin_menu())
+        await edit_callback_screen(callback, f"❌ {escape(str(exc))}", reply_markup=admin_menu())
+
+
+async def show_broadcasts_screen(callback: CallbackQuery, *, clear_state: bool) -> None:
+    assert callback.from_user
+    if clear_state:
+        await clear_interactive_state(callback.from_user.id)
+    campaigns = await api("GET", f"/internal/admin/{callback.from_user.id}/broadcasts")
+    lines = ["📣 <b>Рассылки</b>", "", "Последние кампании:"]
+    for item in campaigns[:5]:
+        lines.append(
+            f"• <code>{item['id'][:8]}</code> · {item['status']} · "
+            f"✅ {item['sent_count']}/{item['total_count']} · ❌ {item['failed_count']} · 🚫 {item['skipped_count']}"
+        )
+    rows = [[InlineKeyboardButton(text="➕ Создать рассылку", callback_data="adm:broadcast:new")]]
+    rows.extend([[InlineKeyboardButton(text=f"⛔ Отменить {item['id'][:8]}", callback_data=f"adm:bcancel:{item['id']}")]
+                 for item in campaigns if item["status"] in {"queued", "processing"}])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:home")])
+    await edit_callback_screen(callback, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 @dp.callback_query(F.data == "adm:broadcast")
 async def admin_broadcast_callback(callback: CallbackQuery) -> None:
-    assert callback.from_user
     try:
-        await clear_interactive_state(callback.from_user.id)
-        campaigns = await api("GET", f"/internal/admin/{callback.from_user.id}/broadcasts")
-        lines = ["📣 <b>Рассылки</b>", "", "Последние кампании:"]
-        for item in campaigns[:5]:
-            lines.append(
-                f"• <code>{item['id'][:8]}</code> · {item['status']} · "
-                f"✅ {item['sent_count']}/{item['total_count']} · ❌ {item['failed_count']} · 🚫 {item['skipped_count']}"
-            )
-        rows = [[InlineKeyboardButton(text="➕ Создать рассылку", callback_data="adm:broadcast:new")]]
-        rows.extend([[InlineKeyboardButton(text=f"⛔ Отменить {item['id'][:8]}", callback_data=f"adm:bcancel:{item['id']}")]
-                     for item in campaigns if item["status"] in {"queued", "processing"}])
-        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:home")])
-        keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
-        await callback.message.answer("\n".join(lines), reply_markup=keyboard)
+        await show_broadcasts_screen(callback, clear_state=True)
         await callback.answer()
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -565,7 +665,8 @@ async def admin_broadcast_new(callback: CallbackQuery) -> None:
         await api("GET", f"/internal/admin/{callback.from_user.id}/dashboard")
         await clear_interactive_state(callback.from_user.id)
         await broadcast_drafts.begin(callback.from_user.id)
-        await callback.message.answer(
+        await edit_callback_screen(
+            callback,
             "Пришлите сообщение для рассылки. Формат определяется автоматически:\n"
             "• текст — текстовая рассылка;\n"
             "• фото — рассылка с фото;\n"
@@ -587,6 +688,7 @@ async def admin_broadcast_cancel(callback: CallbackQuery) -> None:
     campaign_id = callback.data.rsplit(":", 1)[1]
     try:
         await api("POST", f"/internal/admin/{callback.from_user.id}/broadcasts/{campaign_id}/cancel")
+        await show_broadcasts_screen(callback, clear_state=False)
         await callback.answer("Отмена запрошена", show_alert=True)
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -602,7 +704,8 @@ async def admin_broadcast_segment(callback: CallbackQuery) -> None:
     state["draft"]["segment"] = callback.data.rsplit(":", 1)[1]
     state["stage"] = "buttons"
     await broadcast_drafts.save(callback.from_user.id, state)
-    await callback.message.answer(
+    await edit_callback_screen(
+        callback,
         "Добавить кнопки со ссылками? Их можно пропустить.",
         reply_markup=broadcast_buttons_markup(),
     )
@@ -616,7 +719,8 @@ async def admin_broadcast_add_buttons(callback: CallbackQuery) -> None:
     if not state or state.get("stage") != "buttons":
         await callback.answer("Черновик не найден", show_alert=True)
         return
-    await callback.message.answer(
+    await edit_callback_screen(
+        callback,
         "Пришлите до 6 кнопок: каждая строка в формате\n"
         "<code>Текст кнопки | https://site.ru</code>\n\n"
         "Можно отправить /skip, чтобы продолжить без кнопок."
@@ -650,15 +754,15 @@ async def admin_broadcast_edit(callback: CallbackQuery) -> None:
         state["draft"].update({"kind": None, "text_html": "", "photo_file_id": None, "buttons": []})
         state["stage"] = "content"
         await broadcast_drafts.save(callback.from_user.id, state)
-        await callback.message.answer("Пришлите новое сообщение: текст, фото или фото с подписью.")
+        await edit_callback_screen(callback, "Пришлите новое сообщение: текст, фото или фото с подписью.")
     elif action == "segment" and state.get("stage") == "preview":
         state["stage"] = "segment"
         await broadcast_drafts.save(callback.from_user.id, state)
-        await callback.message.answer("Выберите новый сегмент получателей:", reply_markup=broadcast_segment_markup())
+        await edit_callback_screen(callback, "Выберите новый сегмент получателей:", reply_markup=broadcast_segment_markup())
     elif action == "buttons" and state.get("stage") == "preview":
         state["stage"] = "buttons"
         await broadcast_drafts.save(callback.from_user.id, state)
-        await callback.message.answer("Измените кнопки или пропустите их:", reply_markup=broadcast_buttons_markup())
+        await edit_callback_screen(callback, "Измените кнопки или пропустите их:", reply_markup=broadcast_buttons_markup())
     else:
         await callback.answer("Этот шаг уже недоступен", show_alert=True)
         return
@@ -717,7 +821,8 @@ async def admin_broadcast_confirm(callback: CallbackQuery) -> None:
         }
         result = await api("POST", f"/internal/admin/{callback.from_user.id}/broadcasts", json=payload)
         await broadcast_drafts.clear(callback.from_user.id)
-        await callback.message.answer(
+        await edit_callback_screen(
+            callback,
             f"✅ Рассылка <code>{result['id'][:8]}</code> поставлена в очередь. "
             "После завершения я пришлю полный отчёт по доставке.",
             reply_markup=admin_menu(),
@@ -733,7 +838,11 @@ async def access_flow(callback: CallbackQuery) -> None:
     devices = await api("GET", f"/internal/users/{telegram_id}/devices")
     if len(devices) >= 8:
         buttons = [[InlineKeyboardButton(text=f"♻️ Перевыпустить: {item['label']}", callback_data=f"vpn:rotate:{item['id']}")] for item in devices]
-        await callback.message.answer("У вас уже 8 устройств. Выберите устройство для перевыпуска ссылки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await edit_callback_screen(
+            callback,
+            "У вас уже 8 устройств. Выберите устройство для перевыпуска ссылки:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
         await callback.answer()
         return
     target_devices = len(devices) + 1
@@ -773,7 +882,13 @@ async def rotate(callback: CallbackQuery) -> None:
 
 @dp.callback_query(F.data == "vpn:help")
 async def help_callback(callback: CallbackQuery) -> None:
-    await callback.message.answer("1. Нажмите «Получить VPN».\n2. Откройте страницу Zaza VPN по QR-коду или кнопке.\n3. Нажмите «Скопировать ссылку» и установите HAPP.\n4. В HAPP выберите «+» → «Импорт по ссылке», вставьте ссылку и включите первый сервер.", reply_markup=menu())
+    # The button lives on the QR photo. Keep that media and its direct
+    # connection link intact; the navigation helper creates a text screen.
+    await edit_callback_screen(
+        callback,
+        "1. Нажмите «Получить VPN».\n2. Откройте страницу Zaza VPN по QR-коду или кнопке.\n3. Нажмите «Скопировать ссылку» и установите HAPP.\n4. В HAPP выберите «+» → «Импорт по ссылке», вставьте ссылку и включите первый сервер.",
+        reply_markup=menu(),
+    )
     await callback.answer()
 
 
@@ -781,7 +896,7 @@ async def help_callback(callback: CallbackQuery) -> None:
 async def status_callback(callback: CallbackQuery) -> None:
     info = await api("GET", "/internal/status")
     ping = f"{info['average_ping']} мс" if info.get("average_ping") is not None else "ещё измеряется"
-    await callback.message.answer(f"Активных нод: {info['active_nodes']}\nСредний ping: {ping}", reply_markup=menu())
+    await edit_callback_screen(callback, f"Активных нод: {info['active_nodes']}\nСредний ping: {ping}", reply_markup=menu())
     await callback.answer()
 
 
@@ -790,7 +905,11 @@ async def support_callback(callback: CallbackQuery) -> None:
     assert callback.from_user
     await ensure_user(callback)
     support_waiting.add(callback.from_user.id)
-    await callback.message.answer("Опишите проблему одним сообщением: укажите клиент, устройство и что именно не работает. Я передам обращение администратору.", reply_markup=menu())
+    await edit_callback_screen(
+        callback,
+        "Опишите проблему одним сообщением: укажите клиент, устройство и что именно не работает. Я передам обращение администратору.",
+        reply_markup=menu(),
+    )
     await callback.answer()
 
 

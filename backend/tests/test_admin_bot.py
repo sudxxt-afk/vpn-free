@@ -138,6 +138,27 @@ class AdminBotTests(unittest.TestCase):
 
 
 class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
+    async def test_navigation_edits_text_screen_instead_of_sending_new_message(self):
+        message = SimpleNamespace(text="Старый экран", edit_text=AsyncMock(), answer=AsyncMock())
+        callback = SimpleNamespace(message=message)
+        await bot_module.edit_callback_screen(callback, "Новый экран")
+        message.edit_text.assert_awaited_once_with(
+            "Новый экран",
+            reply_markup=None,
+            disable_web_page_preview=True,
+        )
+        message.answer.assert_not_awaited()
+
+    async def test_navigation_keeps_media_and_falls_back_to_one_text_screen(self):
+        message = SimpleNamespace(text=None, photo=[SimpleNamespace()], answer=AsyncMock())
+        callback = SimpleNamespace(message=message)
+        await bot_module.edit_callback_screen(callback, "Новый экран")
+        message.answer.assert_awaited_once_with(
+            "Новый экран",
+            reply_markup=None,
+            disable_web_page_preview=True,
+        )
+
     async def test_buttons_are_attached_to_text_delivery(self):
         payload = BroadcastCreate(client_request_id=uuid4(), segment="active", text_html="<b>Новость</b>",
                                   buttons=[{"text": "Открыть", "url": "https://example.com"}])
