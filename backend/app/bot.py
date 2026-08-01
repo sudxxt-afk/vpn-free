@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup,
                            LabeledPrice, Message, PreCheckoutQuery)
+from aiogram.utils.text_decorations import html_decoration
 
 from app.config import get_settings
 from app.services.broadcast_drafts import BroadcastDraftStore
@@ -84,6 +85,18 @@ def telegram_media_file_id(file_id: str) -> str:
     return file_id.removeprefix(DOCUMENT_MEDIA_PREFIX)
 
 
+def telegram_message_html(message: Message, *, caption: bool = False) -> str:
+    """Return Telegram's native formatting as HTML on every supported aiogram version."""
+    text = getattr(message, "caption", None) if caption else getattr(message, "text", None)
+    if not text:
+        return ""
+    # Admins may enter Telegram HTML directly; keep it for the sanitizer below.
+    if "<" in text and ">" in text:
+        return text
+    entities = getattr(message, "caption_entities", None) if caption else getattr(message, "entities", None)
+    return html_decoration.unparse(text, entities)
+
+
 def broadcast_segment_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Активные", callback_data="adm:bc:segment:active"), InlineKeyboardButton(text="Все известные", callback_data="adm:bc:segment:all")],
@@ -138,6 +151,10 @@ async def show_broadcast_preview(target: Message | CallbackQuery, draft: dict) -
 async def record_telegram_block(event: ErrorEvent) -> bool:
     """Telegram does not provide a list of blockers; record a confirmed send failure."""
     if not isinstance(event.exception, TelegramForbiddenError):
+        logging.error(
+            "Unhandled Telegram update",
+            exc_info=(type(event.exception), event.exception, event.exception.__traceback__),
+        )
         return False
     update = event.update
     origin = update.message or update.callback_query
@@ -842,9 +859,7 @@ async def state_message(message: Message) -> None:
     if broadcast_state and broadcast_state.get("stage") == "content":
         if message.photo:
             photo_file_id = message.photo[-1].file_id
-            source_text = raw_text
-            if source_text and not ("<" in source_text and ">" in source_text):
-                source_text = message.html_caption or source_text
+            source_text = telegram_message_html(message, caption=True)
             clean = sanitize_telegram_html(source_text)
             if len(clean) > 1024:
                 await message.answer("Подпись к фото превышает лимит Telegram: 1024 символа.")
@@ -859,9 +874,7 @@ async def state_message(message: Message) -> None:
                 await message.answer("Это не картинка. Пришлите текст, фото или файл с изображением.")
                 return
             photo_file_id = f"{DOCUMENT_MEDIA_PREFIX}{document.file_id}"
-            source_text = raw_text
-            if source_text and not ("<" in source_text and ">" in source_text):
-                source_text = message.html_caption or source_text
+            source_text = telegram_message_html(message, caption=True)
             clean = sanitize_telegram_html(source_text)
             if len(clean) > 1024:
                 await message.answer("Подпись к картинке превышает лимит Telegram: 1024 символа.")
@@ -869,9 +882,7 @@ async def state_message(message: Message) -> None:
             kind = "document_caption" if clean else "document"
         elif message.text:
             photo_file_id = None
-            source_text = message.text
-            if source_text and not ("<" in source_text and ">" in source_text):
-                source_text = message.html_text or source_text
+            source_text = telegram_message_html(message)
             clean = sanitize_telegram_html(source_text)
             if not clean or len(clean) > 4096:
                 await message.answer("Текст пустой или превышает лимит Telegram: 4096 символов.")

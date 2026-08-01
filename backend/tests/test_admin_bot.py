@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 from unittest.mock import AsyncMock, patch
 
+from aiogram import Bot
+from aiogram.types import Message, Update
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -227,8 +229,47 @@ class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(drafts.state["stage"], "segment")
         self.assertEqual(drafts.state["draft"]["kind"], "document_caption")
         self.assertEqual(drafts.state["draft"]["photo_file_id"], "document:document-id")
-        self.assertEqual(drafts.state["draft"]["text_html"], "<b>Подпись</b>")
+        self.assertEqual(drafts.state["draft"]["text_html"], "Подпись")
         message.answer.assert_awaited_once()
+
+    async def test_real_telegram_photo_caption_reaches_broadcast_handler(self):
+        class Drafts:
+            def __init__(self):
+                self.state = {
+                    "stage": "content",
+                    "client_request_id": str(uuid4()),
+                    "draft": {"kind": None, "segment": None, "text_html": "", "photo_file_id": None, "buttons": []},
+                }
+
+            async def load(self, _telegram_id):
+                return self.state
+
+            async def save(self, _telegram_id, state):
+                self.state = state
+
+        update = Update.model_validate({
+            "update_id": 100,
+            "message": {
+                "message_id": 1,
+                "date": 0,
+                "chat": {"id": 780, "type": "private"},
+                "from": {"id": 780, "is_bot": False, "first_name": "Admin"},
+                "photo": [{"file_id": "photo-id", "file_unique_id": "photo-unique", "width": 10, "height": 10}],
+                "caption": "Подпись",
+                "caption_entities": [{"type": "bold", "offset": 0, "length": 7}],
+            },
+        })
+        drafts = Drafts()
+        fake_telegram = Bot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+        try:
+            with patch.object(bot_module, "broadcast_drafts", drafts), patch.object(Message, "answer", new=AsyncMock()):
+                await bot_module.dp.feed_update(fake_telegram, update)
+        finally:
+            await fake_telegram.session.close()
+        self.assertEqual(drafts.state["stage"], "segment")
+        self.assertEqual(drafts.state["draft"]["kind"], "photo_caption")
+        self.assertEqual(drafts.state["draft"]["photo_file_id"], "photo-id")
+        self.assertEqual(drafts.state["draft"]["text_html"], "<b>Подпись</b>")
 
     async def test_worker_completes_persisted_campaign(self):
         engine = create_engine("sqlite:///:memory:")
