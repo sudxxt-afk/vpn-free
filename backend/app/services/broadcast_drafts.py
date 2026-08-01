@@ -19,7 +19,7 @@ class BroadcastDraftStore:
 
     async def begin(self, telegram_id: int) -> dict:
         state = {
-            "stage": "content",
+            "stage": "segment",
             "client_request_id": str(uuid.uuid4()),
             "draft": {"text_html": "", "photo_file_id": None, "buttons": []},
         }

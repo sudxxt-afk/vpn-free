@@ -161,11 +161,12 @@ class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
 
         first = BroadcastDraftStore(FakeRedis())
         state = await first.begin(501)
+        self.assertEqual(state["stage"], "segment")
         state["draft"]["text_html"] = "<b>Сохранено</b>"
-        state["stage"] = "buttons"
+        state["stage"] = "content"
         await first.save(501, state)
         restored = await BroadcastDraftStore(FakeRedis()).load(501)
-        self.assertEqual((restored["stage"], restored["draft"]["text_html"]), ("buttons", "<b>Сохранено</b>"))
+        self.assertEqual((restored["stage"], restored["draft"]["text_html"]), ("content", "<b>Сохранено</b>"))
 
     async def test_worker_completes_persisted_campaign(self):
         engine = create_engine("sqlite:///:memory:")
