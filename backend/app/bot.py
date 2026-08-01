@@ -11,7 +11,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup,
-                           LabeledPrice, Message, PreCheckoutQuery)
+                           InputMediaPhoto, LabeledPrice, Message, PreCheckoutQuery)
 from aiogram.utils.text_decorations import html_decoration
 
 from app.config import get_settings
@@ -138,6 +138,81 @@ async def edit_callback_screen(
             await message.answer(text, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview)
             return
         raise
+
+
+async def edit_callback_photo(
+    callback: CallbackQuery,
+    photo: BufferedInputFile,
+    caption: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Turn a callback screen into a photo screen, with a safe stale-message fallback."""
+    message = callback.message
+    try:
+        await message.edit_media(
+            InputMediaPhoto(media=photo, caption=caption),
+            reply_markup=reply_markup,
+        )
+    except TelegramBadRequest as exc:
+        detail = str(exc).lower()
+        if "message is not modified" in detail:
+            return
+        if any(fragment in detail for fragment in (
+            "message can't be edited",
+            "message to edit not found",
+            "message_id_invalid",
+            "message is too old",
+        )):
+            logging.info("Cannot edit QR screen; sending a replacement: %s", exc)
+            await message.answer_photo(photo, caption=caption, reply_markup=reply_markup)
+            return
+        raise
+
+
+async def edit_callback_qr_caption(
+    callback: CallbackQuery,
+    caption: str,
+    *,
+    reply_markup: InlineKeyboardMarkup,
+) -> bool:
+    """Edit QR instructions in place; keep old QR buttons from becoming dead ends."""
+    try:
+        await callback.message.edit_caption(caption, reply_markup=reply_markup)
+        return True
+    except TelegramBadRequest as exc:
+        detail = str(exc).lower()
+        if "message is not modified" in detail:
+            return True
+        if any(fragment in detail for fragment in (
+            "message can't be edited",
+            "message to edit not found",
+            "message_id_invalid",
+            "message is too old",
+        )):
+            logging.info("Cannot edit QR caption; using a replacement screen: %s", exc)
+            await edit_callback_screen(callback, caption, reply_markup=menu())
+            return False
+        raise
+
+
+def qr_keyboard(landing_url: str, *, show_back: bool = False) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="⚡ Открыть Zaza VPN", url=landing_url)]]
+    if show_back:
+        rows.append([InlineKeyboardButton(text="◀️ К QR-коду", callback_data="vpn:qr")])
+    else:
+        rows.append([InlineKeyboardButton(text="📘 Инструкция", callback_data="vpn:help")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def qr_landing_url(callback: CallbackQuery) -> str | None:
+    """Recover the private landing link already attached to the current QR screen."""
+    markup = getattr(callback.message, "reply_markup", None)
+    for row in getattr(markup, "inline_keyboard", []) or []:
+        for button in row:
+            if button.url and button.url.startswith(f"{settings.web_app_base_url.rstrip('/')}/connect?"):
+                return button.url
+    return None
 
 
 def broadcast_segment_markup() -> InlineKeyboardMarkup:
@@ -279,12 +354,9 @@ async def send_subscription(target: Message | CallbackQuery, device: dict) -> No
     image.save(buffer, format="PNG")
     caption = f"✨ <b>VPN готов</b>\n\n📱 Устройство {device['slot']}: {device['label']}\n\nОткройте страницу Zaza VPN: она скопирует личную подписку и покажет, как импортировать её в <b>HAPP</b>.\n\n📶 <b>Автоподключение Wi‑Fi</b> и 📡 <b>Автоподключение LTE</b> будут первыми серверами в HAPP."
     photo = BufferedInputFile(buffer.getvalue(), filename="vpn-subscription.png")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡ Открыть Zaza VPN", url=landing_url)],
-        [InlineKeyboardButton(text="📘 Инструкция", callback_data="vpn:help")],
-    ])
+    keyboard = qr_keyboard(landing_url)
     if isinstance(target, CallbackQuery):
-        await target.message.answer_photo(photo, caption=caption, reply_markup=keyboard)
+        await edit_callback_photo(target, photo, caption, reply_markup=keyboard)
     else:
         await target.answer_photo(photo, caption=caption, reply_markup=keyboard)
 
@@ -882,12 +954,41 @@ async def rotate(callback: CallbackQuery) -> None:
 
 @dp.callback_query(F.data == "vpn:help")
 async def help_callback(callback: CallbackQuery) -> None:
-    # The button lives on the QR photo. Keep that media and its direct
-    # connection link intact; the navigation helper creates a text screen.
-    await edit_callback_screen(
+    landing_url = qr_landing_url(callback)
+    if not getattr(callback.message, "photo", None) or not landing_url:
+        # An old button can be attached to a non-QR message. Preserve a usable path
+        # instead of trying to edit a caption where Telegram cannot display one.
+        await edit_callback_screen(
+            callback,
+            "1. Нажмите «Получить VPN».\n2. Откройте страницу Zaza VPN по QR-коду или кнопке.\n3. Нажмите «Скопировать ссылку» и установите HAPP.\n4. В HAPP выберите «+» → «Импорт по ссылке», вставьте ссылку и включите первый сервер.",
+            reply_markup=menu(),
+        )
+        await callback.answer()
+        return
+    await edit_callback_qr_caption(
         callback,
-        "1. Нажмите «Получить VPN».\n2. Откройте страницу Zaza VPN по QR-коду или кнопке.\n3. Нажмите «Скопировать ссылку» и установите HAPP.\n4. В HAPP выберите «+» → «Импорт по ссылке», вставьте ссылку и включите первый сервер.",
-        reply_markup=menu(),
+        "📘 <b>Как подключиться</b>\n\n"
+        "1. Откройте страницу Zaza VPN кнопкой или отсканируйте QR-код.\n"
+        "2. Нажмите «Скопировать ссылку» и установите HAPP.\n"
+        "3. В HAPP выберите «+» → «Импорт по ссылке», вставьте ссылку.\n"
+        "4. Включите первый сервер — для Wi‑Fi или LTE.",
+        reply_markup=qr_keyboard(landing_url, show_back=True),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "vpn:qr")
+async def qr_callback(callback: CallbackQuery) -> None:
+    landing_url = qr_landing_url(callback)
+    if not getattr(callback.message, "photo", None) or not landing_url:
+        await edit_callback_screen(callback, "Главное меню", reply_markup=menu())
+        await callback.answer()
+        return
+    await edit_callback_qr_caption(
+        callback,
+        "✨ <b>VPN готов</b>\n\n"
+        "Откройте страницу Zaza VPN кнопкой или отсканируйте QR-код. Там будет личная ссылка и инструкция для HAPP.",
+        reply_markup=qr_keyboard(landing_url),
     )
     await callback.answer()
 

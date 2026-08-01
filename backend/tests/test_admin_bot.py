@@ -159,6 +159,43 @@ class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
             disable_web_page_preview=True,
         )
 
+    async def test_vpn_qr_replaces_the_current_navigation_message(self):
+        class FakeCallback:
+            def __init__(self, message):
+                self.message = message
+
+        message = SimpleNamespace(edit_media=AsyncMock(), answer_photo=AsyncMock())
+        callback = FakeCallback(message)
+        with patch.object(bot_module, "CallbackQuery", FakeCallback):
+            await bot_module.send_subscription(callback, {
+                "subscription_url": "https://zazavpn.ru/s/private-token",
+                "slot": 1,
+                "label": "Телефон",
+            })
+        message.edit_media.assert_awaited_once()
+        media = message.edit_media.await_args.args[0]
+        self.assertEqual(media.type, "photo")
+        self.assertIn("VPN готов", media.caption)
+        self.assertEqual(message.edit_media.await_args.kwargs["reply_markup"].inline_keyboard[1][0].callback_data, "vpn:help")
+        message.answer_photo.assert_not_awaited()
+
+    async def test_qr_instruction_edits_the_caption_and_keeps_the_private_link(self):
+        landing_url = f"{bot_module.settings.web_app_base_url.rstrip('/')}/connect?token=private-token"
+        message = SimpleNamespace(
+            photo=[SimpleNamespace()],
+            reply_markup=bot_module.qr_keyboard(landing_url),
+            edit_caption=AsyncMock(),
+            answer=AsyncMock(),
+        )
+        callback = SimpleNamespace(message=message, answer=AsyncMock())
+        await bot_module.help_callback(callback)
+        message.edit_caption.assert_awaited_once()
+        self.assertIn("Как подключиться", message.edit_caption.await_args.args[0])
+        markup = message.edit_caption.await_args.kwargs["reply_markup"]
+        self.assertEqual(markup.inline_keyboard[0][0].url, landing_url)
+        self.assertEqual(markup.inline_keyboard[1][0].callback_data, "vpn:qr")
+        message.answer.assert_not_awaited()
+
     async def test_buttons_are_attached_to_text_delivery(self):
         payload = BroadcastCreate(client_request_id=uuid4(), segment="active", text_html="<b>Новость</b>",
                                   buttons=[{"text": "Открыть", "url": "https://example.com"}])
