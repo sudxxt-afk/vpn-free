@@ -2,26 +2,29 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.crypto import decrypt
 from app.database import Base, SessionLocal, engine, get_db
-from app.models import AdminUser, AnalyticsEvent, AuditLog, Device, MetricSnapshot, Node, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceRun, TelegramUser
-from app.schemas import (AdminCreate, AdminResponse, BotUserRequest, ChannelCreate, ChannelResponse, DashboardResponse,
+from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, BroadcastDelivery, Device, MetricSnapshot,
+                        Node, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceRun, SupportMessage, SupportTicket, TelegramUser)
+from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLookup, BotUserRequest, BroadcastCreate, ChannelCreate, ChannelResponse, DashboardResponse,
                          DeviceCreate, DeviceResponse, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
                          AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
-                         NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse)
+                         NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, SupportReplyPayload, SupportTicketCreate)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_github_url, refresh_source
 from app.services.parser import classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.telegram import has_required_memberships, validate_bot_admin
 from app.services.subgram import get_partner_access
 from app.services.rate_limit import is_allowed
+from app.services.telegram_html import sanitize_telegram_html
 
 settings = get_settings()
 
@@ -34,6 +37,10 @@ def bootstrap() -> None:
             db.execute(text("ALTER TABLE telegram_users ALTER COLUMN telegram_id TYPE BIGINT"))
             db.execute(text("ALTER TABLE required_channels ALTER COLUMN chat_id TYPE BIGINT"))
             db.execute(text("ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_blocked_at TIMESTAMPTZ"))
+            db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS telegram_id BIGINT"))
+            db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS telegram_username VARCHAR(128)"))
+            db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS support_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
+            db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_admin_users_telegram_id ON admin_users (telegram_id) WHERE telegram_id IS NOT NULL"))
             db.commit()
         exists = db.scalar(select(AdminUser).where(AdminUser.login == settings.initial_admin_login))
         if not exists:
@@ -76,6 +83,37 @@ app.add_middleware(
 def audit(db: Session, action: str, admin_login: str | None = None, details: str | None = None) -> None:
     admin = db.scalar(select(AdminUser).where(AdminUser.login == admin_login)) if admin_login else None
     db.add(AuditLog(admin_id=admin.id if admin else None, action=action, details=details))
+
+
+def audit_admin(db: Session, action: str, admin: AdminUser, details: str | None = None) -> None:
+    db.add(AuditLog(admin_id=admin.id, action=action, details=details))
+
+
+def managed_admin_response(item: AdminUser) -> ManagedAdminResponse:
+    return ManagedAdminResponse(id=item.id, login=item.login, role=item.role, is_active=item.is_active,
+                                telegram_id=item.telegram_id, telegram_username=item.telegram_username,
+                                support_enabled=item.support_enabled)
+
+
+def resolve_telegram_identity(db: Session, telegram_id: int | None, username: str | None) -> tuple[int | None, str | None]:
+    normalized = username.strip().lstrip("@") if username else None
+    if telegram_id is not None:
+        known = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
+        return telegram_id, known.username if known and known.username else normalized
+    if normalized:
+        known = db.scalar(select(TelegramUser).where(func.lower(TelegramUser.username) == normalized.lower()))
+        if not known:
+            raise HTTPException(status_code=422, detail="Пользователь с таким @username ещё не запускал бота")
+        return known.telegram_id, known.username
+    return None, None
+
+
+def require_bot_admin(db: Session, telegram_id: int, *, support: bool = False) -> AdminUser:
+    admin = db.scalar(select(AdminUser).where(AdminUser.telegram_id == telegram_id, AdminUser.is_active.is_(True),
+                                               AdminUser.role.in_([Role.OWNER, Role.ADMIN])))
+    if not admin or (support and not admin.support_enabled):
+        raise HTTPException(status_code=403, detail="Нет доступа к Telegram-админке")
+    return admin
 
 
 def track_event(db: Session, event_type: str, user_id: UUID | None = None, device_id: UUID | None = None) -> None:
@@ -242,8 +280,7 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
 @app.get("/admin/administrators", response_model=list[ManagedAdminResponse])
 def list_administrators(request: Request, db: Session = Depends(get_db)) -> list[ManagedAdminResponse]:
     require_admin(request, {Role.OWNER})
-    return [ManagedAdminResponse(id=item.id, login=item.login, role=item.role, is_active=item.is_active)
-            for item in db.scalars(select(AdminUser).order_by(AdminUser.created_at)).all()]
+    return [managed_admin_response(item) for item in db.scalars(select(AdminUser).order_by(AdminUser.created_at)).all()]
 
 
 @app.post("/admin/administrators", response_model=ManagedAdminResponse, status_code=status.HTTP_201_CREATED)
@@ -251,12 +288,42 @@ def create_administrator(payload: AdminCreate, request: Request, db: Session = D
     current = require_admin(request, {Role.OWNER})
     if db.scalar(select(AdminUser).where(AdminUser.login == payload.login)):
         raise HTTPException(status_code=409, detail="Такой логин уже существует")
-    item = AdminUser(login=payload.login, password_hash=hash_password(payload.password), role=payload.role)
+    if payload.support_enabled and payload.role == Role.VIEWER:
+        raise HTTPException(status_code=422, detail="Viewer не может работать с поддержкой")
+    telegram_id, username = resolve_telegram_identity(db, payload.telegram_id, payload.telegram_username)
+    if telegram_id and db.scalar(select(AdminUser).where(AdminUser.telegram_id == telegram_id)):
+        raise HTTPException(status_code=409, detail="Этот Telegram уже привязан к другому администратору")
+    item = AdminUser(login=payload.login, password_hash=hash_password(payload.password), role=payload.role,
+                     telegram_id=telegram_id, telegram_username=username, support_enabled=payload.support_enabled)
     db.add(item)
     audit(db, "administrator.create", current["sub"], f"{item.login}:{item.role.value}")
     db.commit()
     db.refresh(item)
-    return ManagedAdminResponse(id=item.id, login=item.login, role=item.role, is_active=item.is_active)
+    return managed_admin_response(item)
+
+
+@app.patch("/admin/administrators/{admin_id}", response_model=ManagedAdminResponse)
+def update_administrator(admin_id: UUID, payload: AdminUpdate, request: Request, db: Session = Depends(get_db)) -> ManagedAdminResponse:
+    current = require_admin(request, {Role.OWNER})
+    item = db.get(AdminUser, admin_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Администратор не найден")
+    if payload.support_enabled and payload.role == Role.VIEWER:
+        raise HTTPException(status_code=422, detail="Viewer не может работать с поддержкой")
+    if item.login == current["sub"] and (not payload.is_active or payload.role != Role.OWNER):
+        raise HTTPException(status_code=409, detail="Нельзя отключить или понизить текущего владельца")
+    telegram_id, username = resolve_telegram_identity(db, payload.telegram_id, payload.telegram_username)
+    if telegram_id and db.scalar(select(AdminUser).where(AdminUser.telegram_id == telegram_id, AdminUser.id != item.id)):
+        raise HTTPException(status_code=409, detail="Этот Telegram уже привязан к другому администратору")
+    item.role = payload.role
+    item.telegram_id = telegram_id
+    item.telegram_username = username
+    item.support_enabled = payload.support_enabled
+    item.is_active = payload.is_active
+    audit(db, "administrator.update", current["sub"], f"{item.login}:{item.role.value}:{telegram_id}")
+    db.commit()
+    db.refresh(item)
+    return managed_admin_response(item)
 
 
 @app.get("/admin/users", response_model=list[ManagedUserResponse])
@@ -521,6 +588,216 @@ async def bot_create_device(telegram_id: int, payload: DeviceCreate, db: Session
     db.commit()
     db.refresh(device)
     return device_response(device, include_url=True, plain_token=token)
+
+
+def ticket_payload(db: Session, ticket: SupportTicket) -> dict:
+    user = db.get(TelegramUser, ticket.user_id)
+    messages = db.scalars(select(SupportMessage).where(SupportMessage.ticket_id == ticket.id).order_by(SupportMessage.created_at)).all()
+    return {
+        "id": str(ticket.id), "status": ticket.status, "telegram_id": user.telegram_id if user else None,
+        "username": user.username if user else None, "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+        "claimed_by_admin_id": str(ticket.claimed_by_admin_id) if ticket.claimed_by_admin_id else None,
+        "messages": [{"sender_type": item.sender_type, "text": item.text, "created_at": item.created_at.isoformat() if item.created_at else None}
+                     for item in messages],
+    }
+
+
+def campaign_payload(item: BroadcastCampaign) -> dict:
+    return {"id": str(item.id), "segment": item.segment, "status": item.status, "text_html": item.text_html,
+            "has_photo": bool(item.photo_file_id), "total_count": item.total_count, "sent_count": item.sent_count,
+            "failed_count": item.failed_count, "skipped_count": item.skipped_count,
+            "created_at": item.created_at.isoformat() if item.created_at else None}
+
+
+@app.get("/internal/admin/{telegram_id}/dashboard", dependencies=[Depends(require_internal)])
+def bot_admin_dashboard(telegram_id: int, db: Session = Depends(get_db)) -> dict:
+    admin = require_bot_admin(db, telegram_id)
+    return {
+        "login": admin.login, "role": admin.role.value, "support_enabled": admin.support_enabled,
+        "active_nodes": db.scalar(select(func.count()).select_from(Node).where(Node.state == NodeState.ACTIVE)) or 0,
+        "problem_nodes": db.scalar(select(func.count()).select_from(Node).where(Node.state.in_([NodeState.DEGRADED, NodeState.QUARANTINED]))) or 0,
+        "average_ping": db.scalar(select(func.avg(Node.avg_latency_ms)).where(Node.state == NodeState.ACTIVE)),
+        "source_errors": db.scalar(select(func.count()).select_from(Source).where(Source.last_error.is_not(None))) or 0,
+        "new_tickets": db.scalar(select(func.count()).select_from(SupportTicket).where(SupportTicket.status == "new")) or 0,
+        "active_broadcasts": db.scalar(select(func.count()).select_from(BroadcastCampaign).where(BroadcastCampaign.status.in_(["queued", "processing"]))) or 0,
+    }
+
+
+@app.get("/internal/support/admins", dependencies=[Depends(require_internal)])
+def support_admins(db: Session = Depends(get_db)) -> list[int]:
+    return list(db.scalars(select(AdminUser.telegram_id).where(AdminUser.is_active.is_(True), AdminUser.support_enabled.is_(True),
+                                                              AdminUser.telegram_id.is_not(None),
+                                                              AdminUser.role.in_([Role.OWNER, Role.ADMIN]))).all())
+
+
+@app.post("/internal/users/{telegram_id}/tickets", dependencies=[Depends(require_internal)])
+def create_support_ticket(telegram_id: int, payload: SupportTicketCreate, db: Session = Depends(get_db)) -> dict:
+    user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    ticket = SupportTicket(user_id=user.id)
+    db.add(ticket)
+    db.flush()
+    db.add(SupportMessage(ticket_id=ticket.id, sender_type="user", text=payload.text.strip()))
+    db.commit()
+    db.refresh(ticket)
+    result = ticket_payload(db, ticket)
+    result["admin_ids"] = support_admins(db)
+    return result
+
+
+@app.get("/internal/admin/{telegram_id}/tickets", dependencies=[Depends(require_internal)])
+def admin_tickets(telegram_id: int, status_filter: str | None = None, limit: int = 20, db: Session = Depends(get_db)) -> list[dict]:
+    require_bot_admin(db, telegram_id, support=True)
+    query = select(SupportTicket).order_by(SupportTicket.created_at.desc()).limit(min(limit, 50))
+    if status_filter in {"new", "answered", "closed"}:
+        query = query.where(SupportTicket.status == status_filter)
+    return [ticket_payload(db, item) for item in db.scalars(query).all()]
+
+
+@app.post("/internal/admin/{telegram_id}/tickets/{ticket_id}/claim", dependencies=[Depends(require_internal)])
+def claim_ticket(telegram_id: int, ticket_id: UUID, db: Session = Depends(get_db)) -> dict:
+    admin = require_bot_admin(db, telegram_id, support=True)
+    ticket = db.get(SupportTicket, ticket_id)
+    if not ticket or ticket.status == "closed":
+        raise HTTPException(status_code=404, detail="Обращение недоступно")
+    if ticket.claimed_by_admin_id and ticket.claimed_by_admin_id != admin.id:
+        raise HTTPException(status_code=409, detail="Обращение уже взял другой администратор")
+    if not ticket.claimed_by_admin_id:
+        result = db.execute(update(SupportTicket).where(SupportTicket.id == ticket_id, SupportTicket.claimed_by_admin_id.is_(None))
+                            .values(claimed_by_admin_id=admin.id, claimed_at=datetime.now(timezone.utc)))
+        if result.rowcount != 1:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Обращение уже взял другой администратор")
+        audit_admin(db, "support.ticket.claim", admin, str(ticket_id))
+        db.commit()
+    return ticket_payload(db, db.get(SupportTicket, ticket_id))
+
+
+@app.post("/internal/admin/{telegram_id}/tickets/{ticket_id}/reply", dependencies=[Depends(require_internal)])
+async def reply_ticket(telegram_id: int, ticket_id: UUID, payload: SupportReplyPayload, db: Session = Depends(get_db)) -> dict:
+    admin = require_bot_admin(db, telegram_id, support=True)
+    ticket = db.get(SupportTicket, ticket_id)
+    if not ticket or ticket.claimed_by_admin_id != admin.id or ticket.status == "closed":
+        raise HTTPException(status_code=409, detail="Сначала возьмите открытое обращение в работу")
+    user = db.get(TelegramUser, ticket.user_id)
+    if not user or not settings.telegram_bot_token:
+        raise HTTPException(status_code=503, detail="Бот недоступен для отправки ответа")
+    endpoint = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(endpoint, json={"chat_id": user.telegram_id, "text": f"💬 Ответ поддержки Zaza VPN\n\n{payload.text.strip()}"})
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Telegram не принял ответ; попробуйте ещё раз") from exc
+    ticket.status = "answered"
+    ticket.replied_at = datetime.now(timezone.utc)
+    db.add(SupportMessage(ticket_id=ticket.id, sender_type="admin", admin_id=admin.id, text=payload.text.strip()))
+    audit_admin(db, "support.ticket.reply", admin, str(ticket_id))
+    db.commit()
+    return {"ticket": ticket_payload(db, ticket), "user_telegram_id": user.telegram_id if user else None}
+
+
+@app.post("/internal/admin/{telegram_id}/tickets/{ticket_id}/{action}", dependencies=[Depends(require_internal)])
+def change_ticket_status(telegram_id: int, ticket_id: UUID, action: str, db: Session = Depends(get_db)) -> dict:
+    admin = require_bot_admin(db, telegram_id, support=True)
+    ticket = db.get(SupportTicket, ticket_id)
+    if not ticket or action not in {"close", "reopen"}:
+        raise HTTPException(status_code=404, detail="Обращение или действие не найдено")
+    if action == "close":
+        ticket.status = "closed"
+        ticket.closed_at = datetime.now(timezone.utc)
+    else:
+        ticket.status = "new"
+        ticket.closed_at = None
+        ticket.claimed_by_admin_id = None
+        ticket.claimed_at = None
+    audit_admin(db, f"support.ticket.{action}", admin, str(ticket_id))
+    db.commit()
+    return ticket_payload(db, ticket)
+
+
+@app.post("/internal/admin/{telegram_id}/users/search", dependencies=[Depends(require_internal)])
+def admin_user_search(telegram_id: int, payload: AdminUserLookup, db: Session = Depends(get_db)) -> dict:
+    require_bot_admin(db, telegram_id)
+    value = payload.query.strip().lstrip("@")
+    user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == int(value))) if value.isdigit() else db.scalar(
+        select(TelegramUser).where(func.lower(TelegramUser.username) == value.lower()))
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    devices = db.scalar(select(func.count()).select_from(Device).where(Device.user_id == user.id, Device.is_revoked.is_(False))) or 0
+    return {"id": str(user.id), "telegram_id": user.telegram_id, "username": user.username, "is_blocked": user.is_blocked,
+            "device_count": devices, "last_membership_check": user.last_membership_check.isoformat() if user.last_membership_check else None}
+
+
+@app.post("/internal/admin/{telegram_id}/users/{user_id}/block", dependencies=[Depends(require_internal)])
+def admin_user_block(telegram_id: int, user_id: UUID, db: Session = Depends(get_db)) -> dict:
+    admin = require_bot_admin(db, telegram_id)
+    user = db.get(TelegramUser, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    user.is_blocked = not user.is_blocked
+    audit_admin(db, "telegram.user.block" if user.is_blocked else "telegram.user.unblock", admin, str(user.telegram_id))
+    db.commit()
+    return {"is_blocked": user.is_blocked}
+
+
+@app.get("/internal/admin/{telegram_id}/sources", dependencies=[Depends(require_internal)])
+def admin_sources(telegram_id: int, db: Session = Depends(get_db)) -> list[dict]:
+    require_bot_admin(db, telegram_id)
+    return [{"id": str(item.id), "name": item.name, "is_enabled": item.is_enabled, "last_error": item.last_error,
+             "last_success_at": item.last_success_at.isoformat() if item.last_success_at else None}
+            for item in db.scalars(select(Source).order_by(Source.created_at)).all()]
+
+
+@app.post("/internal/admin/{telegram_id}/sources/{source_id}/refresh", dependencies=[Depends(require_internal)])
+def admin_refresh_source(telegram_id: int, source_id: UUID, db: Session = Depends(get_db)) -> dict:
+    admin = require_bot_admin(db, telegram_id)
+    source = db.get(Source, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Источник не найден")
+    run = refresh_source(db, source)
+    audit_admin(db, "telegram.source.refresh", admin, f"{source_id}:{run.status}")
+    db.commit()
+    return {"name": source.name, "status": run.status, "found_count": run.found_count,
+            "published_count": run.published_count, "message": run.message}
+
+
+@app.get("/internal/admin/{telegram_id}/broadcasts", dependencies=[Depends(require_internal)])
+def admin_broadcasts(telegram_id: int, db: Session = Depends(get_db)) -> list[dict]:
+    require_bot_admin(db, telegram_id)
+    return [campaign_payload(item) for item in db.scalars(select(BroadcastCampaign).order_by(BroadcastCampaign.created_at.desc()).limit(10)).all()]
+
+
+@app.post("/internal/admin/{telegram_id}/broadcasts", dependencies=[Depends(require_internal)])
+def create_broadcast(telegram_id: int, payload: BroadcastCreate, db: Session = Depends(get_db)) -> dict:
+    admin = require_bot_admin(db, telegram_id)
+    clean = sanitize_telegram_html(payload.text_html)
+    max_length = 1024 if payload.photo_file_id else 4096
+    if len(clean) > max_length:
+        raise HTTPException(status_code=422, detail=f"Текст превышает лимит Telegram: {max_length} символов")
+    if not clean and not payload.photo_file_id:
+        raise HTTPException(status_code=422, detail="Рассылка не может быть пустой")
+    item = BroadcastCampaign(author_admin_id=admin.id, segment=payload.segment, text_html=clean,
+                             photo_file_id=payload.photo_file_id)
+    db.add(item)
+    db.flush()
+    audit_admin(db, "broadcast.create", admin, f"{item.id}:{payload.segment}")
+    db.commit()
+    db.refresh(item)
+    return campaign_payload(item)
+
+
+@app.post("/internal/admin/{telegram_id}/broadcasts/{campaign_id}/cancel", dependencies=[Depends(require_internal)])
+def cancel_broadcast(telegram_id: int, campaign_id: UUID, db: Session = Depends(get_db)) -> dict:
+    admin = require_bot_admin(db, telegram_id)
+    item = db.get(BroadcastCampaign, campaign_id)
+    if not item or item.status in {"completed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Рассылку уже нельзя отменить")
+    item.cancel_requested = True
+    audit_admin(db, "broadcast.cancel", admin, str(campaign_id))
+    db.commit()
+    return campaign_payload(item)
 
 
 @app.get("/s/{token}")

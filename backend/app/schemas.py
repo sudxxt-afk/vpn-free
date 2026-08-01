@@ -20,6 +20,17 @@ class AdminCreate(BaseModel):
     login: str = Field(min_length=3, max_length=80)
     password: str = Field(min_length=12, max_length=200)
     role: Role = Role.VIEWER
+    telegram_id: int | None = None
+    telegram_username: str | None = Field(default=None, max_length=128)
+    support_enabled: bool = False
+
+
+class AdminUpdate(BaseModel):
+    role: Role
+    telegram_id: int | None = None
+    telegram_username: str | None = Field(default=None, max_length=128)
+    support_enabled: bool = False
+    is_active: bool = True
 
 
 class ManagedAdminResponse(BaseModel):
@@ -27,6 +38,9 @@ class ManagedAdminResponse(BaseModel):
     login: str
     role: Role
     is_active: bool
+    telegram_id: int | None = None
+    telegram_username: str | None = None
+    support_enabled: bool = False
 
 
 class ManagedUserResponse(BaseModel):
@@ -125,6 +139,24 @@ class LandingEventPayload(BaseModel):
 
 class InternalEventPayload(BaseModel):
     event_type: str = Field(pattern="^(bot_start|vpn_issued)$")
+
+
+class SupportTicketCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class SupportReplyPayload(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class AdminUserLookup(BaseModel):
+    query: str = Field(min_length=1, max_length=128)
+
+
+class BroadcastCreate(BaseModel):
+    segment: str = Field(pattern="^(active|all|with_devices|without_devices)$")
+    text_html: str = Field(default="", max_length=4096)
+    photo_file_id: str | None = Field(default=None, max_length=512)
 
 
 class AnalyticsDayResponse(BaseModel):

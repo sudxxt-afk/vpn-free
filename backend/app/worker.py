@@ -17,6 +17,7 @@ from app.services.alerts import notify_admins, should_alert
 from app.services.github import refresh_source
 from app.services.health import check_active_nodes
 from app.services.telegram import has_required_memberships
+from app.services.broadcasts import process_broadcasts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 settings = get_settings()
@@ -110,4 +111,5 @@ if __name__ == "__main__":
     scheduler.add_job(health_check, "interval", minutes=settings.health_check_minutes, id="health", max_instances=1, coalesce=True)
     scheduler.add_job(revalidate_memberships, "interval", hours=settings.membership_check_hours, id="memberships", max_instances=1, coalesce=True)
     scheduler.add_job(infrastructure_check, "interval", minutes=settings.alert_check_minutes, id="infrastructure", max_instances=1, coalesce=True)
+    scheduler.add_job(process_broadcasts, "interval", seconds=5, id="broadcasts", max_instances=1, coalesce=True)
     scheduler.start()

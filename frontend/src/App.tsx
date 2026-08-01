@@ -11,8 +11,11 @@ type Channel = { id: string; chat_id: number; title: string; username: string | 
 type PoolPolicy = { vless_reality_limit: number; vless_ws_limit: number; vless_other_limit: number; hysteria2_limit: number; tuic_limit: number; trojan_limit: number; shadowsocks_limit: number; vmess_limit: number; updated_at: string | null };
 type AnalyticsDay = { date: string; bot_starts: number; site_visits: number; happ_launches: number; vpn_issued: number; subscription_opens: number };
 type Analytics = { total_bot_users: number; new_bot_users: number; known_bot_blocks: number; active_users_1d: number; active_users_7d: number; active_users_30d: number; active_devices: number; funnel_bot_users: number; funnel_site_users: number; funnel_happ_users: number; funnel_subscription_users: number; bot_starts: number; unique_site_visitors: number; happ_launches: number; vpn_issued: number; subscription_opens: number; days: AnalyticsDay[] };
+type CurrentAdmin = { login: string; role: "owner" | "admin" | "viewer" };
+type Administrator = { id: string; login: string; role: "owner" | "admin" | "viewer"; is_active: boolean; telegram_id: number | null; telegram_username: string | null; support_enabled: boolean };
 
 const nav = [
+  { key: "administrators", label: "Администраторы", icon: ShieldCheck },
   { key: "overview", label: "Обзор", icon: Gauge },
   { key: "analytics", label: "Аналитика", icon: BarChart3 },
   { key: "sources", label: "Источники", icon: Link2 },
@@ -61,13 +64,16 @@ export function App() {
   const [policy, setPolicy] = useState<PoolPolicy | null>(null);
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [notice, setNotice] = useState("");
+  const [currentAdmin, setCurrentAdmin] = useState<CurrentAdmin | null>(null);
+  const [administrators, setAdministrators] = useState<Administrator[]>([]);
 
   const refresh = useCallback(async () => {
     try {
-      const [summary, sourceList, nodeList, channelList, metricList, policyValue, analyticsValue] = await Promise.all([
-        request<Dashboard>("/admin/dashboard"), request<Source[]>("/admin/sources"), request<Node[]>("/admin/nodes"), request<Channel[]>("/admin/channels"), request<Metric[]>("/admin/metrics"), request<PoolPolicy>("/admin/pool-policy"), request<Analytics>("/admin/analytics"),
+      const [me, summary, sourceList, nodeList, channelList, metricList, policyValue, analyticsValue] = await Promise.all([
+        request<CurrentAdmin>("/auth/me"), request<Dashboard>("/admin/dashboard"), request<Source[]>("/admin/sources"), request<Node[]>("/admin/nodes"), request<Channel[]>("/admin/channels"), request<Metric[]>("/admin/metrics"), request<PoolPolicy>("/admin/pool-policy"), request<Analytics>("/admin/analytics"),
       ]);
-      setDashboard(summary); setSources(sourceList); setNodes(nodeList); setChannels(channelList); setMetrics(metricList); setPolicy(policyValue); setAnalytics(analyticsValue); setAuthenticated(true);
+      const administratorList = me.role === "owner" ? await request<Administrator[]>("/admin/administrators") : [];
+      setCurrentAdmin(me); setAdministrators(administratorList); setDashboard(summary); setSources(sourceList); setNodes(nodeList); setChannels(channelList); setMetrics(metricList); setPolicy(policyValue); setAnalytics(analyticsValue); setAuthenticated(true);
     } catch { setAuthenticated(false); }
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
@@ -75,12 +81,13 @@ export function App() {
   const logout = async () => { await request("/auth/logout", { method: "POST" }); setAuthenticated(false); };
   const title = nav.find((item) => item.key === page)?.label || "Обзор";
   const issueCount = useMemo(() => sources.filter((source) => source.last_error).length, [sources]);
+  const visibleNav = currentAdmin?.role === "owner" ? nav : nav.filter((item) => item.key !== "administrators");
 
   if (authenticated === null) return <div className="splash"><span className="brand-mark">Z</span></div>;
   if (!authenticated) return <Login onSuccess={refresh} />;
   return <div className={compact ? "app compact" : "app"}>
     <aside className="sidebar"><div className="brand-lockup"><span className="brand-mark">Z</span><span className="brand-name">ZAZA VPN</span></div>
-      <nav aria-label="Основная навигация">{nav.map(({ key, label, icon: Icon }) => <button key={key} className={page === key ? "nav-item active" : "nav-item"} onClick={() => setPage(key)}><Icon size={19}/><span>{label}</span>{key === "sources" && issueCount > 0 && <b>{issueCount}</b>}</button>)}</nav>
+      <nav aria-label="Основная навигация">{visibleNav.map(({ key, label, icon: Icon }) => <button key={key} className={page === key ? "nav-item active" : "nav-item"} onClick={() => setPage(key)}><Icon size={19}/><span>{label}</span>{key === "sources" && issueCount > 0 && <b>{issueCount}</b>}</button>)}</nav>
       <div className="sidebar-bottom"><div className="system-state"><span className="pulse"/> Система работает</div><button className="nav-item" onClick={logout}><LogOut size={19}/><span>Выйти</span></button></div>
     </aside>
     <main className="content"><header><div className="headline"><button className="icon-button mobile-menu" aria-label="Открыть меню" onClick={() => setCompact(!compact)}><Menu size={20}/></button><div><p className="eyebrow">CONTROL / {page.toUpperCase()}</p><h1>{title}</h1></div></div><div className="header-actions"><button className="icon-button" aria-label="Обновить данные" onClick={() => { refresh(); notify("Данные обновлены"); }}><RefreshCw size={19}/></button><button className="icon-button" aria-label="Уведомления"><Bell size={19}/><i/></button><div className="avatar">A</div></div></header>
@@ -92,6 +99,7 @@ export function App() {
       {page === "policy" && policy && <SubscriptionPolicy policy={policy} onChanged={refresh} notify={notify} />}
       {page === "channels" && <Channels channels={channels} onChanged={refresh} notify={notify} />}
       {page === "users" && <UsersPage notify={notify} />}
+      {page === "administrators" && currentAdmin?.role === "owner" && <AdministratorsPage administrators={administrators} onChanged={refresh} notify={notify} />}
     </main>
   </div>;
 }
@@ -183,6 +191,37 @@ function UsersPage({ notify }: { notify: (message: string) => void }) {
   const load = useCallback(async () => { setLoading(true); try { setUsers(await request<ManagedUser[]>("/admin/users")); } catch (err) { notify(err instanceof Error ? err.message : "Не удалось загрузить пользователей"); } finally { setLoading(false); } }, [notify]);
   useEffect(() => { load(); }, [load]);
   return <section className="page-stack"><div className="page-intro"><div><p className="eyebrow">ACCESS CONTROL</p><h2>Пользователи</h2><p>Блокировка отключает выдачу подписки. Импортированные внешние конфиги остаются вне контроля сервиса.</p></div><button className="primary" onClick={load}><RefreshCw size={16}/>Обновить</button></div><article className="panel"><div className="panel-head"><div><p className="eyebrow">TELEGRAM ACCOUNTS</p><h3>Доступ и ячейки устройств</h3></div><span className="muted">{users.length} записей</span></div><div className="table-wrap"><table><thead><tr><th>Пользователь</th><th>Telegram ID</th><th>Ячейки</th><th>Проверка каналов</th><th>Доступ</th><th/></tr></thead><tbody>{users.map((user) => <tr key={user.id}><td><strong>{user.username ? `@${user.username}` : "Без username"}</strong></td><td>{user.telegram_id}</td><td>{user.device_count} / 8</td><td>{formatDate(user.last_membership_check)}</td><td><span className={user.is_blocked ? "state quarantined" : "state active"}>{user.is_blocked ? "blocked" : "active"}</span></td><td><button className="ghost" aria-label={user.is_blocked ? "Разблокировать" : "Заблокировать"} onClick={async () => { try { await request(`/admin/users/${user.id}/block`, { method: "PATCH" }); await load(); notify(user.is_blocked ? "Пользователь разблокирован" : "Пользователь заблокирован"); } catch (err) { notify(err instanceof Error ? err.message : "Ошибка"); } }}>{user.is_blocked ? <Check size={17}/> : <X size={17}/>}</button></td></tr>)}</tbody></table>{!loading && users.length === 0 && <Empty text="Пользователи появятся после первого запуска Telegram-бота."/>}{loading && <div className="empty"><p>Загрузка…</p></div>}</div></article></section>;
+}
+
+function AdministratorsPage({ administrators, onChanged, notify }: { administrators: Administrator[]; onChanged: () => Promise<void>; notify: (message: string) => void }) {
+  const [login, setLogin] = useState(""); const [password, setPassword] = useState(""); const [role, setRole] = useState<Administrator["role"]>("admin");
+  const [telegram, setTelegram] = useState(""); const [support, setSupport] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const identity = (value: string) => /^\d+$/.test(value.trim()) ? { telegram_id: Number(value.trim()), telegram_username: null } : { telegram_id: null, telegram_username: value.trim() || null };
+  const add = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setError(""); try {
+    await request("/admin/administrators", { method: "POST", body: JSON.stringify({ login, password, role, support_enabled: support && role !== "viewer", ...identity(telegram) }) });
+    setLogin(""); setPassword(""); setTelegram(""); await onChanged(); notify("Администратор создан");
+  } catch (err) { setError(err instanceof Error ? err.message : "Не удалось создать администратора"); } finally { setBusy(false); } };
+  return <section className="page-stack"><article className="panel add-source"><div><p className="eyebrow">ACCESS CONTROL</p><h2>Новый администратор</h2><p>Telegram ID можно указать напрямую. @username разрешается только для пользователя, который уже запускал бота.</p></div><form className="channel-form" onSubmit={add}>
+    <label>Логин<input required minLength={3} value={login} onChange={(e) => setLogin(e.target.value)} /></label>
+    <label>Пароль<input required type="password" minLength={12} value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+    <label>Роль<select value={role} onChange={(e) => { const value = e.target.value as Administrator["role"]; setRole(value); if (value === "viewer") setSupport(false); }}><option value="owner">owner</option><option value="admin">admin</option><option value="viewer">viewer</option></select></label>
+    <label>Telegram ID или @username<input placeholder="123456789 или @username" value={telegram} onChange={(e) => setTelegram(e.target.value)} /></label>
+    <label><span>Доступ к поддержке</span><input type="checkbox" checked={support} disabled={role === "viewer"} onChange={(e) => setSupport(e.target.checked)} /></label>
+    {error && <p className="form-error"><CircleAlert size={16}/>{error}</p>}<button className="primary" disabled={busy}>{busy ? "Создаём…" : "Добавить администратора"}</button>
+  </form></article><article className="panel"><div className="panel-head"><div><p className="eyebrow">TEAM</p><h3>Администраторы</h3></div><span className="muted">{administrators.length} записей</span></div><div className="source-list">{administrators.map((item) => <AdministratorRow key={item.id} item={item} onChanged={onChanged} notify={notify} />)}</div></article></section>;
+}
+
+function AdministratorRow({ item, onChanged, notify }: { item: Administrator; onChanged: () => Promise<void>; notify: (message: string) => void }) {
+  const [role, setRole] = useState(item.role); const [telegram, setTelegram] = useState(item.telegram_id ? String(item.telegram_id) : (item.telegram_username ? `@${item.telegram_username}` : ""));
+  const [support, setSupport] = useState(item.support_enabled); const [active, setActive] = useState(item.is_active); const [busy, setBusy] = useState(false);
+  const save = async () => { setBusy(true); try { const value = telegram.trim(); await request(`/admin/administrators/${item.id}`, { method: "PATCH", body: JSON.stringify({ role, is_active: active, support_enabled: support && role !== "viewer", telegram_id: /^\d+$/.test(value) ? Number(value) : null, telegram_username: /^\d+$/.test(value) ? null : value || null }) }); await onChanged(); notify(`Администратор ${item.login} обновлён`); } catch (err) { notify(err instanceof Error ? err.message : "Не удалось сохранить"); } finally { setBusy(false); } };
+  return <div className="source-card"><div className="source-card-title"><div><strong>{item.login}</strong><small>{item.telegram_username ? `@${item.telegram_username}` : item.telegram_id || "Telegram не привязан"}</small></div><span className={active ? "pill" : "pill off"}>{active ? "Активен" : "Отключён"}</span></div><div className="channel-form">
+    <label>Роль<select value={role} onChange={(e) => { const value = e.target.value as Administrator["role"]; setRole(value); if (value === "viewer") setSupport(false); }}><option value="owner">owner</option><option value="admin">admin</option><option value="viewer">viewer</option></select></label>
+    <label>Telegram<input value={telegram} placeholder="ID или @username" onChange={(e) => setTelegram(e.target.value)} /></label>
+    <label><span>Поддержка</span><input type="checkbox" checked={support} disabled={role === "viewer"} onChange={(e) => setSupport(e.target.checked)} /></label>
+    <label><span>Учётная запись активна</span><input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /></label>
+    <button className="primary" type="button" disabled={busy} onClick={save}>{busy ? "Сохраняем…" : "Сохранить"}</button>
+  </div></div>;
 }
 
 function Empty({ text, action, onClick }: { text: string; action?: string; onClick?: () => void }) { return <div className="empty"><div className="empty-icon"><ShieldCheck size={22}/></div><p>{text}</p>{action && <button className="text-button" onClick={onClick}>{action}</button>}</div>; }

@@ -35,3 +35,9 @@ VLESS, Shadowsocks, Trojan, VMess, Hysteria2 and TUIC.
 - GitHub source refresh: every 40 minutes.
 - Active-node health checks: every 10 minutes.
 - Telegram membership revalidation: every 12 hours.
+
+## Telegram operator panel
+
+The web owner manages administrators in the **Administrators** section. Bind an existing bot user's Telegram ID or `@username`, choose the `owner` or `admin` role, and enable support access. The user must have started the bot before a username can be resolved.
+
+Bound administrators open the operator panel with `/admin`. It includes support tickets, user lookup and blocking, pool/source status, manual source refreshes, and durable segmented broadcasts. Broadcasts accept Telegram HTML formatting and either text or one photo with a formatted caption; the worker delivers them from the PostgreSQL-backed queue and resumes unfinished campaigns after a restart.
