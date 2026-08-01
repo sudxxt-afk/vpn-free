@@ -104,7 +104,15 @@ async def _send_delivery(bot: Bot, campaign: BroadcastCampaign, chat_id: int) ->
         [InlineKeyboardButton(text=item["text"], url=item["url"])] for item in buttons
     ]) if buttons else None
     if campaign.photo_file_id:
-        await bot.send_photo(chat_id, campaign.photo_file_id, caption=campaign.text_html or None, reply_markup=markup)
+        if campaign.photo_file_id.startswith("document:"):
+            await bot.send_document(
+                chat_id,
+                campaign.photo_file_id.removeprefix("document:"),
+                caption=campaign.text_html or None,
+                reply_markup=markup,
+            )
+        else:
+            await bot.send_photo(chat_id, campaign.photo_file_id, caption=campaign.text_html or None, reply_markup=markup)
     else:
         await bot.send_message(chat_id, campaign.text_html, disable_web_page_preview=True, reply_markup=markup)
 

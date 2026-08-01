@@ -73,6 +73,17 @@ def broadcast_markup(draft: dict) -> InlineKeyboardMarkup | None:
     ]) if buttons else None
 
 
+DOCUMENT_MEDIA_PREFIX = "document:"
+
+
+def is_document_broadcast_media(file_id: str | None) -> bool:
+    return bool(file_id and file_id.startswith(DOCUMENT_MEDIA_PREFIX))
+
+
+def telegram_media_file_id(file_id: str) -> str:
+    return file_id.removeprefix(DOCUMENT_MEDIA_PREFIX)
+
+
 def broadcast_segment_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Активные", callback_data="adm:bc:segment:active"), InlineKeyboardButton(text="Все известные", callback_data="adm:bc:segment:all")],
@@ -107,7 +118,14 @@ async def show_broadcast_preview(target: Message | CallbackQuery, draft: dict) -
     else:
         message = target
     if draft.get("photo_file_id"):
-        await message.answer_photo(draft["photo_file_id"], caption=draft.get("text_html") or None, reply_markup=markup)
+        if is_document_broadcast_media(draft["photo_file_id"]):
+            await message.answer_document(
+                telegram_media_file_id(draft["photo_file_id"]),
+                caption=draft.get("text_html") or None,
+                reply_markup=markup,
+            )
+        else:
+            await message.answer_photo(draft["photo_file_id"], caption=draft.get("text_html") or None, reply_markup=markup)
     else:
         await message.answer(draft["text_html"], disable_web_page_preview=True, reply_markup=markup)
     await message.answer(
@@ -645,7 +663,15 @@ async def admin_broadcast_test(callback: CallbackQuery) -> None:
         for admin_id in recipients:
             try:
                 if draft.get("photo_file_id"):
-                    await callback.bot.send_photo(admin_id, draft["photo_file_id"], caption=draft.get("text_html") or None, reply_markup=markup)
+                    if is_document_broadcast_media(draft["photo_file_id"]):
+                        await callback.bot.send_document(
+                            admin_id,
+                            telegram_media_file_id(draft["photo_file_id"]),
+                            caption=draft.get("text_html") or None,
+                            reply_markup=markup,
+                        )
+                    else:
+                        await callback.bot.send_photo(admin_id, draft["photo_file_id"], caption=draft.get("text_html") or None, reply_markup=markup)
                 else:
                     await callback.bot.send_message(admin_id, draft["text_html"], disable_web_page_preview=True, reply_markup=markup)
                 delivered += 1
@@ -824,6 +850,23 @@ async def state_message(message: Message) -> None:
                 await message.answer("Подпись к фото превышает лимит Telegram: 1024 символа.")
                 return
             kind = "photo_caption" if clean else "photo"
+        elif message.document:
+            document = message.document
+            image_extensions = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+            filename = (document.file_name or "").lower()
+            is_image = (document.mime_type or "").startswith("image/") or filename.endswith(image_extensions)
+            if not is_image:
+                await message.answer("Это не картинка. Пришлите текст, фото или файл с изображением.")
+                return
+            photo_file_id = f"{DOCUMENT_MEDIA_PREFIX}{document.file_id}"
+            source_text = raw_text
+            if source_text and not ("<" in source_text and ">" in source_text):
+                source_text = message.html_caption or source_text
+            clean = sanitize_telegram_html(source_text)
+            if len(clean) > 1024:
+                await message.answer("Подпись к картинке превышает лимит Telegram: 1024 символа.")
+                return
+            kind = "document_caption" if clean else "document"
         elif message.text:
             photo_file_id = None
             source_text = message.text
@@ -845,7 +888,13 @@ async def state_message(message: Message) -> None:
         })
         broadcast_state["stage"] = "segment"
         await broadcast_drafts.save(telegram_id, broadcast_state)
-        content_label = {"text": "текст", "photo": "фото", "photo_caption": "фото с подписью"}[kind]
+        content_label = {
+            "text": "текст",
+            "photo": "фото",
+            "photo_caption": "фото с подписью",
+            "document": "картинка",
+            "document_caption": "картинка с подписью",
+        }[kind]
         await message.answer(
             f"✅ Получено: <b>{content_label}</b>. Теперь выберите сегмент получателей:",
             reply_markup=broadcast_segment_markup(),

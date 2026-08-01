@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app import bot as bot_module
 from app.database import Base
 from app.main import claim_ticket, create_broadcast, create_support_ticket, require_bot_admin, resolve_telegram_identity
 from app.models import AdminUser, BroadcastCampaign, Device, Donation, Role, TelegramUser
@@ -183,6 +184,51 @@ class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
         bot.send_photo.assert_awaited_once()
         self.assertEqual(bot.send_photo.await_args.args, (777, "telegram-file-id"))
         self.assertEqual(bot.send_photo.await_args.kwargs["caption"], "<b>Подпись</b>")
+
+    async def test_image_document_delivery_preserves_caption(self):
+        campaign = SimpleNamespace(
+            photo_file_id="document:telegram-document-id",
+            text_html="<i>Подпись файла</i>",
+            buttons_json="[]",
+        )
+        bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock(), send_document=AsyncMock())
+        await _send_delivery(bot, campaign, 778)
+        bot.send_document.assert_awaited_once()
+        self.assertEqual(bot.send_document.await_args.args, (778, "telegram-document-id"))
+        self.assertEqual(bot.send_document.await_args.kwargs["caption"], "<i>Подпись файла</i>")
+
+    async def test_image_document_with_caption_advances_broadcast_wizard(self):
+        class Drafts:
+            def __init__(self):
+                self.state = {
+                    "stage": "content",
+                    "client_request_id": str(uuid4()),
+                    "draft": {"kind": None, "segment": None, "text_html": "", "photo_file_id": None, "buttons": []},
+                }
+
+            async def load(self, _telegram_id):
+                return self.state
+
+            async def save(self, _telegram_id, state):
+                self.state = state
+
+        drafts = Drafts()
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=779),
+            text=None,
+            caption="Подпись",
+            html_caption="<b>Подпись</b>",
+            photo=None,
+            document=SimpleNamespace(file_id="document-id", mime_type="image/png", file_name="poster.png"),
+            answer=AsyncMock(),
+        )
+        with patch.object(bot_module, "broadcast_drafts", drafts):
+            await bot_module.state_message(message)
+        self.assertEqual(drafts.state["stage"], "segment")
+        self.assertEqual(drafts.state["draft"]["kind"], "document_caption")
+        self.assertEqual(drafts.state["draft"]["photo_file_id"], "document:document-id")
+        self.assertEqual(drafts.state["draft"]["text_html"], "<b>Подпись</b>")
+        message.answer.assert_awaited_once()
 
     async def test_worker_completes_persisted_campaign(self):
         engine = create_engine("sqlite:///:memory:")
