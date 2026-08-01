@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 import httpx
 from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.schedulers.base import BaseScheduler
 from sqlalchemy import func, select
 
 from app.config import get_settings
@@ -131,17 +132,37 @@ def ton_donation_check() -> None:
         logging.exception("TON donation verification failed")
 
 
+def configure_scheduler(scheduler: BaseScheduler) -> None:
+    """Register recurring work without blocking queue processing at boot."""
+    run_now = datetime.now(timezone.utc)
+    scheduler.add_job(
+        refresh_all_sources,
+        "interval",
+        minutes=settings.source_refresh_minutes,
+        id="sources",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=run_now,
+    )
+    scheduler.add_job(
+        health_check,
+        "interval",
+        minutes=settings.health_check_minutes,
+        id="health",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=run_now,
+    )
+    scheduler.add_job(revalidate_memberships, "interval", hours=settings.membership_check_hours, id="memberships", max_instances=1, coalesce=True)
+    scheduler.add_job(infrastructure_check, "interval", minutes=settings.alert_check_minutes, id="infrastructure", max_instances=1, coalesce=True)
+    scheduler.add_job(process_broadcasts, "interval", seconds=5, id="broadcasts", max_instances=1, coalesce=True, next_run_time=run_now)
+    scheduler.add_job(ton_donation_check, "interval", seconds=15, id="ton-donations", max_instances=1, coalesce=True)
+
+
 if __name__ == "__main__":
     # The API usually creates the schema first; this keeps a fresh Compose
     # deployment race-free when the scheduler starts before the API listener.
     Base.metadata.create_all(bind=engine)
-    refresh_all_sources()
-    health_check()
     scheduler = BlockingScheduler(timezone="UTC")
-    scheduler.add_job(refresh_all_sources, "interval", minutes=settings.source_refresh_minutes, id="sources", max_instances=1, coalesce=True)
-    scheduler.add_job(health_check, "interval", minutes=settings.health_check_minutes, id="health", max_instances=1, coalesce=True)
-    scheduler.add_job(revalidate_memberships, "interval", hours=settings.membership_check_hours, id="memberships", max_instances=1, coalesce=True)
-    scheduler.add_job(infrastructure_check, "interval", minutes=settings.alert_check_minutes, id="infrastructure", max_instances=1, coalesce=True)
-    scheduler.add_job(process_broadcasts, "interval", seconds=5, id="broadcasts", max_instances=1, coalesce=True)
-    scheduler.add_job(ton_donation_check, "interval", seconds=15, id="ton-donations", max_instances=1, coalesce=True)
+    configure_scheduler(scheduler)
     scheduler.start()

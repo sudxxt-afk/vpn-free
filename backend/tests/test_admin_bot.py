@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from aiogram import Bot
 from aiogram.types import Message, Update
+from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -22,6 +23,7 @@ from app.services.broadcast_drafts import BroadcastDraftStore
 from app.services.donations import (DonationError, complete_star_donation, create_star_donation,
                                     match_ton_transaction, validate_star_checkout)
 from app.services.telegram_html import sanitize_telegram_html
+from app.worker import configure_scheduler
 
 
 class AdminBotTests(unittest.TestCase):
@@ -302,6 +304,20 @@ class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Доставлено: <b>8</b>", report)
         self.assertIn("Бот недоступен: <b>1</b>", report)
         self.assertIn("chat not found — 1", report)
+
+
+class WorkerSchedulerTests(unittest.TestCase):
+    def test_broadcast_queue_starts_without_waiting_for_health_check(self):
+        scheduler = BackgroundScheduler(timezone="UTC")
+        configure_scheduler(scheduler)
+        scheduler.start(paused=True)
+        try:
+            jobs = {job.id: job for job in scheduler.get_jobs()}
+            self.assertIn("broadcasts", jobs)
+            self.assertEqual(jobs["broadcasts"].trigger.interval.total_seconds(), 5)
+            self.assertIsNotNone(jobs["broadcasts"].next_run_time)
+        finally:
+            scheduler.shutdown(wait=False)
 
 
 if __name__ == "__main__":
