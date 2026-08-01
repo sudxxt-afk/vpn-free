@@ -44,6 +44,7 @@ def _prepare_deliveries(campaign_id) -> None:
         campaign.status = "processing"
         campaign.started_at = campaign.started_at or datetime.now(timezone.utc)
         db.commit()
+        logger.info("Broadcast campaign=%s prepared recipients=%s", campaign.id, len(users))
 
 
 async def _send_delivery(bot: Bot, campaign: BroadcastCampaign, chat_id: int) -> None:
@@ -107,6 +108,7 @@ async def _process_campaign(campaign_id) -> None:
                     delivery.status = "skipped"
                     delivery.error = "bot_blocked"
                     user.bot_blocked_at = datetime.now(timezone.utc)
+                    campaign.skipped_count += 1
                 except TelegramRetryAfter as exc:
                     delivery.attempts -= 1
                     db.commit()
@@ -116,10 +118,12 @@ async def _process_campaign(campaign_id) -> None:
                     delivery.error = str(exc)[:500]
                     if delivery.attempts >= 3:
                         delivery.status = "failed"
+                        campaign.failed_count += 1
                     logger.warning("Broadcast delivery failed campaign=%s user=%s: %s", campaign.id, user.telegram_id, exc)
                 else:
                     delivery.status = "sent"
                     delivery.sent_at = datetime.now(timezone.utc)
+                    campaign.sent_count += 1
                 db.commit()
             await asyncio.sleep(0.05)
     finally:

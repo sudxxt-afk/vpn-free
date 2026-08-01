@@ -169,6 +169,7 @@ class BroadcastButtonPayload(BaseModel):
 
 
 class BroadcastCreate(BaseModel):
+    client_request_id: UUID
     segment: str = Field(pattern="^(active|all|with_devices|without_devices)$")
     text_html: str = Field(default="", max_length=4096)
     photo_file_id: str | None = Field(default=None, max_length=512)

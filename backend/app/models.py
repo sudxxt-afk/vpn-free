@@ -203,6 +203,7 @@ class SupportMessage(Base):
 class BroadcastCampaign(Base):
     __tablename__ = "broadcast_campaigns"
     id: Mapped[uuid.UUID] = uuid_column()
+    client_request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), unique=True, nullable=True)
     author_admin_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True)
     segment: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(24), default="queued", index=True)

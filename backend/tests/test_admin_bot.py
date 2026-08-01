@@ -1,19 +1,21 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from uuid import UUID
-from unittest.mock import AsyncMock
+from uuid import UUID, uuid4
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.main import claim_ticket, create_support_ticket, require_bot_admin, resolve_telegram_identity
-from app.models import AdminUser, Device, Donation, Role, TelegramUser
+from app.main import claim_ticket, create_broadcast, create_support_ticket, require_bot_admin, resolve_telegram_identity
+from app.models import AdminUser, BroadcastCampaign, Device, Donation, Role, TelegramUser
 from app.schemas import BroadcastCreate, SupportTicketCreate
 from app.services.analytics import daily_retention_cohorts, sequential_funnel
 from app.services.broadcasts import _recipient_query, _send_delivery
+from app.services import broadcasts
+from app.services.broadcast_drafts import BroadcastDraftStore
 from app.services.donations import (DonationError, complete_star_donation, create_star_donation,
                                     match_ton_transaction, validate_star_checkout)
 from app.services.telegram_html import sanitize_telegram_html
@@ -105,6 +107,16 @@ class AdminBotTests(unittest.TestCase):
             )
             self.assertEqual(repeated.id, item.id)
 
+    def test_broadcast_confirmation_is_idempotent(self):
+        with self.Session() as db:
+            admin = AdminUser(login="sender", password_hash="x", role=Role.ADMIN, telegram_id=405, is_active=True)
+            db.add(admin); db.commit()
+            payload = BroadcastCreate(client_request_id=uuid4(), segment="all", text_html="Новость")
+            first = create_broadcast(405, payload, db)
+            repeated = create_broadcast(405, payload, db)
+            self.assertEqual(first["id"], repeated["id"])
+            self.assertEqual(len(db.query(BroadcastCampaign).all()), 1)
+
     def test_ton_match_requires_reference_amount_and_fresh_transaction(self):
         now = datetime.now(timezone.utc)
         item = Donation(user_id=UUID(int=7), method="ton", status="pending", amount_nano=1_000_000_000,
@@ -122,13 +134,57 @@ class AdminBotTests(unittest.TestCase):
 
 class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
     async def test_buttons_are_attached_to_text_delivery(self):
-        payload = BroadcastCreate(segment="active", text_html="<b>Новость</b>", buttons=[{"text": "Открыть", "url": "https://example.com"}])
+        payload = BroadcastCreate(client_request_id=uuid4(), segment="active", text_html="<b>Новость</b>",
+                                  buttons=[{"text": "Открыть", "url": "https://example.com"}])
         campaign = SimpleNamespace(photo_file_id=None, text_html=payload.text_html,
                                    buttons_json='[{"text":"Открыть","url":"https://example.com"}]')
         bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
         await _send_delivery(bot, campaign, 123)
         bot.send_message.assert_awaited_once()
         self.assertEqual(bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard[0][0].url, "https://example.com")
+
+    async def test_draft_survives_store_recreation(self):
+        class FakeRedis:
+            values: dict[str, str] = {}
+
+            async def get(self, key):
+                return self.values.get(key)
+
+            async def set(self, key, value, ex=None):
+                self.values[key] = value
+
+            async def delete(self, key):
+                self.values.pop(key, None)
+
+            async def aclose(self):
+                return None
+
+        first = BroadcastDraftStore(FakeRedis())
+        state = await first.begin(501)
+        state["draft"]["text_html"] = "<b>Сохранено</b>"
+        state["stage"] = "buttons"
+        await first.save(501, state)
+        restored = await BroadcastDraftStore(FakeRedis()).load(501)
+        self.assertEqual((restored["stage"], restored["draft"]["text_html"]), ("buttons", "<b>Сохранено</b>"))
+
+    async def test_worker_completes_persisted_campaign(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            user = TelegramUser(telegram_id=601, username="recipient")
+            campaign = BroadcastCampaign(client_request_id=uuid4(), segment="all", text_html="Проверка")
+            db.add_all([user, campaign]); db.commit(); campaign_id = campaign.id
+        fake_bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock(),
+                                   session=SimpleNamespace(close=AsyncMock()))
+        with patch.object(broadcasts, "SessionLocal", Session), patch.object(broadcasts, "Bot", return_value=fake_bot):
+            await broadcasts._process_campaign(campaign_id)
+        with Session() as db:
+            result = db.get(BroadcastCampaign, campaign_id)
+            self.assertEqual((result.status, result.total_count, result.sent_count, result.failed_count),
+                             ("completed", 1, 1, 0))
+        fake_bot.send_message.assert_awaited_once()
+        engine.dispose()
 
 
 if __name__ == "__main__":

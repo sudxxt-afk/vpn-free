@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, 
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -48,6 +49,8 @@ def bootstrap() -> None:
             db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS support_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
             db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_admin_users_telegram_id ON admin_users (telegram_id) WHERE telegram_id IS NOT NULL"))
             db.execute(text("ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]'"))
+            db.execute(text("ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS client_request_id UUID"))
+            db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_broadcast_campaigns_client_request_id ON broadcast_campaigns (client_request_id) WHERE client_request_id IS NOT NULL"))
             db.commit()
         exists = db.scalar(select(AdminUser).where(AdminUser.login == settings.initial_admin_login))
         if not exists:
@@ -914,6 +917,12 @@ def broadcast_test_recipients(telegram_id: int, db: Session = Depends(get_db)) -
 @app.post("/internal/admin/{telegram_id}/broadcasts", dependencies=[Depends(require_internal)])
 def create_broadcast(telegram_id: int, payload: BroadcastCreate, db: Session = Depends(get_db)) -> dict:
     admin = require_bot_admin(db, telegram_id)
+    existing = db.scalar(select(BroadcastCampaign).where(
+        BroadcastCampaign.author_admin_id == admin.id,
+        BroadcastCampaign.client_request_id == payload.client_request_id,
+    ))
+    if existing:
+        return campaign_payload(existing)
     clean = sanitize_telegram_html(payload.text_html)
     max_length = 1024 if payload.photo_file_id else 4096
     if len(clean) > max_length:
@@ -921,12 +930,22 @@ def create_broadcast(telegram_id: int, payload: BroadcastCreate, db: Session = D
     if not clean and not payload.photo_file_id:
         raise HTTPException(status_code=422, detail="Рассылка не может быть пустой")
     buttons_json = json.dumps([button.model_dump() for button in payload.buttons], ensure_ascii=False)
-    item = BroadcastCampaign(author_admin_id=admin.id, segment=payload.segment, text_html=clean,
+    item = BroadcastCampaign(author_admin_id=admin.id, client_request_id=payload.client_request_id,
+                             segment=payload.segment, text_html=clean,
                              photo_file_id=payload.photo_file_id, buttons_json=buttons_json)
     db.add(item)
-    db.flush()
-    audit_admin(db, "broadcast.create", admin, f"{item.id}:{payload.segment}")
-    db.commit()
+    try:
+        db.flush()
+        audit_admin(db, "broadcast.create", admin, f"{item.id}:{payload.segment}")
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(select(BroadcastCampaign).where(
+            BroadcastCampaign.client_request_id == payload.client_request_id,
+        ))
+        if existing:
+            return campaign_payload(existing)
+        raise
     db.refresh(item)
     return campaign_payload(item)
 

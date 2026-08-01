@@ -14,6 +14,7 @@ from aiogram.types import (BufferedInputFile, CallbackQuery, ErrorEvent, InlineK
                            LabeledPrice, Message, PreCheckoutQuery)
 
 from app.config import get_settings
+from app.services.broadcast_drafts import BroadcastDraftStore
 from app.services.telegram_html import sanitize_telegram_html
 
 logging.basicConfig(level=logging.INFO)
@@ -22,10 +23,8 @@ dp = Dispatcher()
 support_waiting: set[int] = set()
 admin_reply_waiting: dict[int, str] = {}
 admin_user_search_waiting: set[int] = set()
-admin_broadcast_waiting: set[int] = set()
-admin_broadcast_buttons_waiting: set[int] = set()
-admin_broadcast_drafts: dict[int, dict] = {}
 donation_custom_waiting: set[int] = set()
+broadcast_drafts = BroadcastDraftStore()
 
 
 def admin_menu() -> InlineKeyboardMarkup:
@@ -459,6 +458,7 @@ async def admin_source_refresh(callback: CallbackQuery) -> None:
 async def admin_broadcast_callback(callback: CallbackQuery) -> None:
     assert callback.from_user
     try:
+        await broadcast_drafts.clear(callback.from_user.id)
         campaigns = await api("GET", f"/internal/admin/{callback.from_user.id}/broadcasts")
         lines = ["📣 <b>Рассылки</b>", "", "Последние кампании:"]
         for item in campaigns[:5]:
@@ -479,7 +479,7 @@ async def admin_broadcast_new(callback: CallbackQuery) -> None:
     assert callback.from_user
     try:
         await api("GET", f"/internal/admin/{callback.from_user.id}/dashboard")
-        admin_broadcast_waiting.add(callback.from_user.id)
+        await broadcast_drafts.begin(callback.from_user.id)
         await callback.message.answer(
             "Пришлите текст или одну фотографию с подписью. Поддерживается Telegram HTML:\n"
             "<code>&lt;b&gt;жирный&lt;/b&gt;</code>, <code>&lt;i&gt;курсив&lt;/i&gt;</code>, "
@@ -506,11 +506,14 @@ async def admin_broadcast_cancel(callback: CallbackQuery) -> None:
 @dp.callback_query(F.data.startswith("adm:segment:"))
 async def admin_broadcast_segment(callback: CallbackQuery) -> None:
     assert callback.from_user and callback.data
-    draft = admin_broadcast_drafts.get(callback.from_user.id)
-    if not draft:
+    state = await broadcast_drafts.load(callback.from_user.id)
+    if not state or state.get("stage") != "segment":
         await callback.answer("Черновик не найден, начните заново", show_alert=True)
         return
+    draft = state["draft"]
     draft["segment"] = callback.data.rsplit(":", 1)[1]
+    state["stage"] = "confirm"
+    await broadcast_drafts.save(callback.from_user.id, state)
     markup = broadcast_markup(draft)
     if draft.get("photo_file_id"):
         await callback.message.answer_photo(draft["photo_file_id"], caption=draft.get("text_html") or None, reply_markup=markup)
@@ -528,10 +531,11 @@ async def admin_broadcast_segment(callback: CallbackQuery) -> None:
 @dp.callback_query(F.data == "adm:broadcast:test")
 async def admin_broadcast_test(callback: CallbackQuery) -> None:
     assert callback.from_user
-    draft = admin_broadcast_drafts.get(callback.from_user.id)
-    if not draft:
+    state = await broadcast_drafts.load(callback.from_user.id)
+    if not state or state.get("stage") != "confirm":
         await callback.answer("Черновик не найден", show_alert=True)
         return
+    draft = state["draft"]
     try:
         recipients = await api("GET", f"/internal/admin/{callback.from_user.id}/broadcasts/test-recipients")
         markup = broadcast_markup(draft)
@@ -553,12 +557,15 @@ async def admin_broadcast_test(callback: CallbackQuery) -> None:
 @dp.callback_query(F.data == "adm:broadcast:confirm")
 async def admin_broadcast_confirm(callback: CallbackQuery) -> None:
     assert callback.from_user
-    draft = admin_broadcast_drafts.pop(callback.from_user.id, None)
-    if not draft or not draft.get("segment"):
+    state = await broadcast_drafts.load(callback.from_user.id)
+    draft = state.get("draft") if state else None
+    if not state or state.get("stage") != "confirm" or not draft or not draft.get("segment"):
         await callback.answer("Черновик не найден", show_alert=True)
         return
     try:
-        result = await api("POST", f"/internal/admin/{callback.from_user.id}/broadcasts", json=draft)
+        payload = {**draft, "client_request_id": state["client_request_id"]}
+        result = await api("POST", f"/internal/admin/{callback.from_user.id}/broadcasts", json=payload)
+        await broadcast_drafts.clear(callback.from_user.id)
         await callback.message.answer(f"✅ Рассылка <code>{result['id'][:8]}</code> поставлена в очередь.", reply_markup=admin_menu())
         await callback.answer("Рассылка запущена")
     except Exception as exc:
@@ -643,9 +650,7 @@ async def state_message(message: Message) -> None:
         donation_custom_waiting.discard(telegram_id)
         admin_reply_waiting.pop(telegram_id, None)
         admin_user_search_waiting.discard(telegram_id)
-        admin_broadcast_waiting.discard(telegram_id)
-        admin_broadcast_buttons_waiting.discard(telegram_id)
-        admin_broadcast_drafts.pop(telegram_id, None)
+        await broadcast_drafts.clear(telegram_id)
         await message.answer("Действие отменено.", reply_markup=menu())
         return
 
@@ -699,7 +704,8 @@ async def state_message(message: Message) -> None:
             await message.answer(f"❌ {escape(str(exc))}", reply_markup=admin_menu())
         return
 
-    if telegram_id in admin_broadcast_buttons_waiting:
+    broadcast_state = await broadcast_drafts.load(telegram_id)
+    if broadcast_state and broadcast_state.get("stage") == "buttons":
         if not message.text:
             await message.answer("Пришлите кнопки текстом или отправьте /skip.")
             return
@@ -719,12 +725,13 @@ async def state_message(message: Message) -> None:
             except ValueError:
                 await message.answer("Неверный формат. Каждая строка: <code>Текст кнопки | https://site.ru</code>")
                 return
-        admin_broadcast_buttons_waiting.discard(telegram_id)
-        admin_broadcast_drafts[telegram_id]["buttons"] = buttons
+        broadcast_state["draft"]["buttons"] = buttons
+        broadcast_state["stage"] = "segment"
+        await broadcast_drafts.save(telegram_id, broadcast_state)
         await ask_broadcast_segment(message)
         return
 
-    if telegram_id in admin_broadcast_waiting:
+    if broadcast_state and broadcast_state.get("stage") == "content":
         photo_file_id = message.photo[-1].file_id if message.photo else None
         source_text = raw_text
         if source_text and not ("<" in source_text and ">" in source_text):
@@ -734,9 +741,9 @@ async def state_message(message: Message) -> None:
         if len(clean) > max_length or (not clean and not photo_file_id):
             await message.answer(f"Сообщение пустое или превышает лимит {max_length} символов.")
             return
-        admin_broadcast_waiting.discard(telegram_id)
-        admin_broadcast_drafts[telegram_id] = {"text_html": clean, "photo_file_id": photo_file_id, "buttons": []}
-        admin_broadcast_buttons_waiting.add(telegram_id)
+        broadcast_state["draft"] = {"text_html": clean, "photo_file_id": photo_file_id, "buttons": []}
+        broadcast_state["stage"] = "buttons"
+        await broadcast_drafts.save(telegram_id, broadcast_state)
         await message.answer("Добавьте кнопки: каждая строка в формате\n<code>Текст кнопки | https://site.ru</code>\n\nДо 6 кнопок. Если кнопки не нужны — /skip.")
         return
 
@@ -765,7 +772,10 @@ async def main() -> None:
         logging.warning("TELEGRAM_BOT_TOKEN is empty; bot will not start")
         return
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode="HTML"))
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await broadcast_drafts.close()
 
 
 if __name__ == "__main__":
