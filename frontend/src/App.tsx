@@ -1,7 +1,16 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, ArrowUpRight, BarChart3, Bell, Check, ChevronRight, CircleAlert, Gauge, Link2, LogOut, Menu, Plus, Radio, RefreshCw, Server, Settings2, ShieldCheck, Users, X } from "lucide-react";
 import { request } from "./api";
 import { Connect } from "./Connect";
+
+const DonatePage = lazy(async () => {
+  const { Buffer } = await import("buffer");
+  const browserGlobal = globalThis as typeof globalThis & { Buffer?: typeof Buffer; global?: typeof globalThis };
+  browserGlobal.Buffer = Buffer;
+  browserGlobal.global = globalThis;
+  const module = await import("./Donate");
+  return { default: module.DonatePage };
+});
 
 type Dashboard = { active_nodes: number; quarantined_nodes: number; average_ping: number | null; active_users: number; sources_with_errors: number; required_channels: number };
 type Metric = { active_nodes: number; quarantined_nodes: number; average_ping_ms: number | null; check_success_rate: number | null; created_at: string };
@@ -11,7 +20,7 @@ type Channel = { id: string; chat_id: number; title: string; username: string | 
 type PoolPolicy = { vless_reality_limit: number; vless_ws_limit: number; vless_other_limit: number; hysteria2_limit: number; tuic_limit: number; trojan_limit: number; shadowsocks_limit: number; vmess_limit: number; updated_at: string | null };
 type AnalyticsDay = { date: string; bot_starts: number; site_visits: number; happ_launches: number; vpn_issued: number; subscription_opens: number };
 type AnalyticsCohort = { date: string; users: number; d0: number | null; d1: number | null; d3: number | null; d7: number | null };
-type Analytics = { total_bot_users: number; new_bot_users: number; known_bot_blocks: number; active_users_1d: number; active_users_7d: number; active_users_30d: number; active_devices: number; funnel_bot_users: number; funnel_vpn_users: number; funnel_site_users: number; funnel_happ_users: number; funnel_subscription_users: number; bot_starts: number; unique_site_visitors: number; happ_launches: number; vpn_issued: number; subscription_opens: number; days: AnalyticsDay[]; cohorts: AnalyticsCohort[] };
+type Analytics = { total_bot_users: number; new_bot_users: number; known_bot_blocks: number; active_users_1d: number; active_users_7d: number; active_users_30d: number; active_devices: number; funnel_bot_users: number; funnel_vpn_users: number; funnel_site_users: number; funnel_happ_users: number; funnel_subscription_users: number; bot_starts: number; unique_site_visitors: number; happ_launches: number; vpn_issued: number; subscription_opens: number; donation_opens: number; donation_supporters: number; donation_stars_count: number; donation_stars_total: number; donation_ton_count: number; donation_ton_total: number; days: AnalyticsDay[]; cohorts: AnalyticsCohort[] };
 type CurrentAdmin = { login: string; role: "owner" | "admin" | "viewer" };
 type Administrator = { id: string; login: string; role: "owner" | "admin" | "viewer"; is_active: boolean; telegram_id: number | null; telegram_username: string | null; support_enabled: boolean };
 
@@ -54,6 +63,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
 
 export function App() {
   if (window.location.pathname.startsWith("/connect")) return <Connect />;
+  if (window.location.pathname.startsWith("/donate")) return <Suspense fallback={<div className="splash"><span className="brand-mark">Z</span></div>}><DonatePage /></Suspense>;
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [page, setPage] = useState("overview");
   const [compact, setCompact] = useState(false);
@@ -147,10 +157,12 @@ function AnalyticsPage({ analytics }: { analytics: Analytics | null }) {
     ["Использовали", analytics.funnel_subscription_users],
   ] as const;
   const retention = (value: number | null) => value === null ? "—" : `${value}%`;
+  const donationConversion = analytics.donation_opens ? Math.round(analytics.donation_supporters * 1000 / analytics.donation_opens) / 10 : 0;
   return <section className="page-stack"><div className="page-intro"><div><p className="eyebrow">PRODUCT ANALYTICS</p><h2>Бот и подключение</h2><p>События без хранения ссылок подписки: старты бота, переходы на сайт, импорт в HAPP и выдачи VPN.</p></div><span className="status-dot">14 ДНЕЙ</span></div>
     <div className="metric-grid">{cards.map(([label, value, description, Icon, tone]) => <article className="metric-card" key={label}><div className={`metric-icon ${tone}`}><Icon size={20}/></div><p>{label}</p><strong>{value}</strong><span>{description}</span></article>)}</div>
     <article className="panel analytics-panel"><div className="panel-head"><div><p className="eyebrow">FUNNEL BY DAY</p><h3>Активность пользователей</h3></div><div className="analytics-legend"><span><i className="dot violet"/>бот</span><span><i className="dot blue"/>сайт</span><span><i className="dot mint"/>HAPP</span></div></div><div className="analytics-bars">{analytics.days.map((day) => <div className="analytics-day" key={day.date}><div className="bar-stack" title={`${day.date}: бот ${day.bot_starts}, сайт ${day.site_visits}, HAPP ${day.happ_launches}`}><i className="bar bot" style={{ height: `${(day.bot_starts / max) * 100}%` }}/><i className="bar site" style={{ height: `${(day.site_visits / max) * 100}%` }}/><i className="bar happ" style={{ height: `${(day.happ_launches / max) * 100}%` }}/></div><small>{new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(new Date(`${day.date}T00:00:00Z`))}</small></div>)}</div></article>
     <article className="panel"><div className="panel-head"><div><p className="eyebrow">CONVERSION FUNNEL</p><h3>/start → VPN → страница → импорт → использование</h3></div><span className="muted">последовательные уникальные пользователи</span></div><div className="funnel-grid">{funnel.map(([label, value], index) => { const conversion = index === 0 ? 100 : (funnel[index - 1][1] ? Math.round(value * 1000 / funnel[index - 1][1]) / 10 : 0); return <div className="funnel-step" key={label}><small>{label}</small><strong>{value}</strong><span>{index === 0 ? "точка входа" : `${conversion}% от прошлого шага`}</span></div>; })}</div></article>
+    <article className="panel"><div className="panel-head"><div><p className="eyebrow">VOLUNTARY SUPPORT</p><h3>Поддержка проекта</h3></div><span className="muted">Stars и подтверждённые TON-транзакции</span></div><div className="donation-grid"><div><small>Открыли раздел</small><strong>{analytics.donation_opens}</strong><span>за последние 14 дней</span></div><div><small>Поддержали</small><strong>{analytics.donation_supporters}</strong><span>{donationConversion}% от открытий</span></div><div><small>Telegram Stars</small><strong>{analytics.donation_stars_total} ⭐</strong><span>{analytics.donation_stars_count} платежей</span></div><div><small>TON</small><strong>{analytics.donation_ton_total} TON</strong><span>{analytics.donation_ton_count} транзакций</span></div></div></article>
     <article className="panel"><div className="panel-head"><div><p className="eyebrow">DAILY COHORTS</p><h3>Удержание пользователей</h3></div><span className="muted">активность в точный день после первого /start</span></div><div className="table-wrap"><table><thead><tr><th>Когорта</th><th>Пользователи</th><th>D0</th><th>D1</th><th>D3</th><th>D7</th></tr></thead><tbody>{analytics.cohorts.map((cohort) => <tr key={cohort.date}><td><strong>{new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(new Date(`${cohort.date}T00:00:00Z`))}</strong></td><td>{cohort.users}</td><td>{retention(cohort.d0)}</td><td>{retention(cohort.d1)}</td><td>{retention(cohort.d3)}</td><td>{retention(cohort.d7)}</td></tr>)}</tbody></table></div></article>
     <article className="panel analytics-detail"><div><p className="eyebrow">SUBSCRIPTIONS</p><h3>Открытия подписок</h3><strong>{analytics.subscription_opens}</strong><p>Загрузки подписки HAPP за последние 14 дней.</p></div><div><p className="eyebrow">NEW USERS</p><h3>Новые пользователи</h3><strong>{analytics.new_bot_users}</strong><p>Уникальные Telegram-аккаунты за последние 14 дней.</p></div><div><p className="eyebrow">BOT STARTS</p><h3>Запуски бота</h3><strong>{analytics.bot_starts}</strong><p>Все события /start за выбранное окно.</p></div></article>
   </section>;

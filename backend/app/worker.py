@@ -18,6 +18,7 @@ from app.services.github import refresh_source
 from app.services.health import check_active_nodes
 from app.services.telegram import has_required_memberships
 from app.services.broadcasts import process_broadcasts
+from app.services.donations import verify_pending_ton_donations
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
@@ -101,6 +102,35 @@ def revalidate_memberships() -> None:
         logging.info("membership validation users=%s failed=%s", len(users), failures)
 
 
+async def _notify_ton_donors(settled: list[tuple[int, float]]) -> None:
+    if not settings.telegram_bot_token:
+        return
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    async with httpx.AsyncClient(timeout=15) as client:
+        for telegram_id, amount in settled:
+            try:
+                await client.post(url, json={
+                    "chat_id": telegram_id,
+                    "parse_mode": "HTML",
+                    "text": f"❤️ <b>Спасибо за поддержку!</b>\n\nTON-транзакция подтверждена: <b>{amount:g} TON</b>.",
+                })
+            except httpx.HTTPError:
+                logging.exception("Unable to notify TON donor %s", telegram_id)
+
+
+def ton_donation_check() -> None:
+    if not settings.ton_donation_address.strip():
+        return
+    try:
+        with SessionLocal() as db:
+            settled = asyncio.run(verify_pending_ton_donations(db))
+        if settled:
+            asyncio.run(_notify_ton_donors(settled))
+            logging.info("confirmed TON donations=%s", len(settled))
+    except (httpx.HTTPError, ValueError):
+        logging.exception("TON donation verification failed")
+
+
 if __name__ == "__main__":
     # The API usually creates the schema first; this keeps a fresh Compose
     # deployment race-free when the scheduler starts before the API listener.
@@ -113,4 +143,5 @@ if __name__ == "__main__":
     scheduler.add_job(revalidate_memberships, "interval", hours=settings.membership_check_hours, id="memberships", max_instances=1, coalesce=True)
     scheduler.add_job(infrastructure_check, "interval", minutes=settings.alert_check_minutes, id="infrastructure", max_instances=1, coalesce=True)
     scheduler.add_job(process_broadcasts, "interval", seconds=5, id="broadcasts", max_instances=1, coalesce=True)
+    scheduler.add_job(ton_donation_check, "interval", seconds=15, id="ton-donations", max_instances=1, coalesce=True)
     scheduler.start()

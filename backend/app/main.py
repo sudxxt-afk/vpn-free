@@ -13,12 +13,13 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.crypto import decrypt
 from app.database import Base, SessionLocal, engine, get_db
-from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, BroadcastDelivery, Device, MetricSnapshot,
+from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, BroadcastDelivery, Device, Donation, MetricSnapshot,
                         Node, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceRun, SupportMessage, SupportTicket, TelegramUser)
 from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLookup, BotUserRequest, BroadcastCreate, ChannelCreate, ChannelResponse, DashboardResponse,
                          DeviceCreate, DeviceResponse, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
                          AnalyticsCohortResponse, AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
-                         NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, SupportReplyPayload, SupportTicketCreate)
+                         NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, StarDonationComplete,
+                         StarDonationIntent, StarDonationPreCheckout, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_github_url, refresh_source
 from app.services.parser import classify_network_profile, display_region, parse_config, transport_key, with_display_name
@@ -27,6 +28,9 @@ from app.services.subgram import get_partner_access
 from app.services.rate_limit import is_allowed
 from app.services.telegram_html import sanitize_telegram_html
 from app.services.analytics import daily_retention_cohorts, sequential_funnel
+from app.services.donations import (DonationError, complete_star_donation, create_star_donation, create_ton_session,
+                                    donation_analytics, donation_by_public_token, donation_summary, prepare_ton_donation,
+                                    public_ton_payload, validate_star_checkout, verify_pending_ton_donations)
 
 settings = get_settings()
 
@@ -121,6 +125,13 @@ def require_bot_admin(db: Session, telegram_id: int, *, support: bool = False) -
 
 def track_event(db: Session, event_type: str, user_id: UUID | None = None, device_id: UUID | None = None) -> None:
     db.add(AnalyticsEvent(event_type=event_type, telegram_user_id=user_id, device_id=device_id))
+
+
+def bot_user(db: Session, telegram_id: int) -> TelegramUser:
+    user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    return user
 
 
 def source_response(source: Source) -> SourceResponse:
@@ -267,6 +278,7 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
         .group_by(AnalyticsEvent.telegram_user_id)
     ).all()
     cohorts = daily_retention_cohorts(first_starts, events, now.date(), cohort_days=min(days, 14))
+    donation_totals = donation_analytics(db, start)
     return AnalyticsResponse(
         total_bot_users=db.scalar(select(func.count()).select_from(TelegramUser)) or 0,
         new_bot_users=db.scalar(select(func.count()).select_from(TelegramUser).where(TelegramUser.created_at >= start)) or 0,
@@ -285,9 +297,35 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
         happ_launches=count("happ_launch"),
         vpn_issued=count("vpn_issued"),
         subscription_opens=count("subscription_open"),
+        donation_opens=count("donation_open"),
+        **donation_totals,
         days=[AnalyticsDayResponse(date=date, **values) for date, values in points.items()],
         cohorts=[AnalyticsCohortResponse(**item) for item in cohorts],
     )
+
+
+@app.post("/admin/donations/{donation_id}/refund")
+async def refund_star_donation(donation_id: UUID, request: Request, db: Session = Depends(get_db)) -> dict:
+    current = require_admin(request, {Role.OWNER})
+    item = db.get(Donation, donation_id)
+    if not item or item.method != "stars" or item.status != "paid" or not item.telegram_payment_charge_id:
+        raise HTTPException(status_code=409, detail="Этот донат нельзя вернуть")
+    user = db.get(TelegramUser, item.user_id)
+    if not user or not settings.telegram_bot_token:
+        raise HTTPException(status_code=503, detail="Telegram-платежи недоступны")
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(
+            f"https://api.telegram.org/bot{settings.telegram_bot_token}/refundStarPayment",
+            json={"user_id": user.telegram_id, "telegram_payment_charge_id": item.telegram_payment_charge_id},
+        )
+    body = response.json()
+    if not response.is_success or not body.get("ok"):
+        raise HTTPException(status_code=502, detail=str(body.get("description") or "Telegram не выполнил возврат"))
+    item.status = "refunded"
+    item.refunded_at = datetime.now(timezone.utc)
+    audit(db, "donation.refund", current["sub"], str(item.id))
+    db.commit()
+    return {"status": "refunded"}
 
 
 @app.get("/admin/administrators", response_model=list[ManagedAdminResponse])
@@ -513,6 +551,88 @@ def bot_event(telegram_id: int, payload: InternalEventPayload, db: Session = Dep
     track_event(db, payload.event_type, user_id=user.id)
     db.commit()
     return {"status": "recorded"}
+
+
+@app.get("/internal/users/{telegram_id}/donations", dependencies=[Depends(require_internal)])
+def bot_donation_summary(telegram_id: int, db: Session = Depends(get_db)) -> dict:
+    return donation_summary(db, bot_user(db, telegram_id))
+
+
+@app.post("/internal/users/{telegram_id}/donations/stars", dependencies=[Depends(require_internal)])
+def bot_create_star_donation(telegram_id: int, payload: StarDonationIntent, db: Session = Depends(get_db)) -> dict:
+    try:
+        item = create_star_donation(db, bot_user(db, telegram_id), payload.amount)
+    except DonationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"id": str(item.id), "invoice_payload": item.invoice_payload, "amount": item.amount_stars}
+
+
+@app.post("/internal/users/{telegram_id}/donations/stars/precheckout", dependencies=[Depends(require_internal)])
+def bot_validate_star_donation(telegram_id: int, payload: StarDonationPreCheckout, db: Session = Depends(get_db)) -> dict:
+    try:
+        validate_star_checkout(db, bot_user(db, telegram_id), payload.invoice_payload, payload.currency, payload.total_amount)
+    except DonationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/internal/users/{telegram_id}/donations/stars/complete", dependencies=[Depends(require_internal)])
+def bot_complete_star_donation(telegram_id: int, payload: StarDonationComplete, db: Session = Depends(get_db)) -> dict:
+    try:
+        item = complete_star_donation(
+            db,
+            bot_user(db, telegram_id),
+            invoice_payload=payload.invoice_payload,
+            currency=payload.currency,
+            total_amount=payload.total_amount,
+            telegram_payment_charge_id=payload.telegram_payment_charge_id,
+            provider_payment_charge_id=payload.provider_payment_charge_id,
+        )
+    except DonationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": item.status, "amount": item.amount_stars}
+
+
+@app.post("/internal/users/{telegram_id}/donations/ton", dependencies=[Depends(require_internal)])
+def bot_create_ton_donation(telegram_id: int, db: Session = Depends(get_db)) -> dict:
+    try:
+        item, token = create_ton_session(db, bot_user(db, telegram_id))
+    except DonationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"id": str(item.id), "url": f"{settings.web_app_base_url.rstrip('/')}/donate?token={token}"}
+
+
+@app.get("/donations/{token}")
+def public_donation(token: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return public_ton_payload(donation_by_public_token(db, token))
+    except DonationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/donations/{token}/prepare")
+def public_prepare_donation(token: str, payload: TonDonationPrepare, db: Session = Depends(get_db)) -> dict:
+    try:
+        item = donation_by_public_token(db, token)
+        if not settings.ton_donation_address.strip():
+            raise DonationError("TON-донаты пока не настроены")
+        return public_ton_payload(prepare_ton_donation(db, item, payload.amount))
+    except DonationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/donations/{token}/verify")
+async def public_verify_donation(token: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        item = donation_by_public_token(db, token)
+        if item.status == "pending" and item.reference:
+            await verify_pending_ton_donations(db)
+            db.refresh(item)
+        return public_ton_payload(item)
+    except DonationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="Не удалось проверить TON-транзакцию. Попробуйте ещё раз") from exc
 
 
 @app.post("/events/landing")

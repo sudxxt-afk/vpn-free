@@ -10,7 +10,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup,
+                           LabeledPrice, Message, PreCheckoutQuery)
 
 from app.config import get_settings
 from app.services.telegram_html import sanitize_telegram_html
@@ -24,6 +25,7 @@ admin_user_search_waiting: set[int] = set()
 admin_broadcast_waiting: set[int] = set()
 admin_broadcast_buttons_waiting: set[int] = set()
 admin_broadcast_drafts: dict[int, dict] = {}
+donation_custom_waiting: set[int] = set()
 
 
 def admin_menu() -> InlineKeyboardMarkup:
@@ -91,6 +93,7 @@ def menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📥 Получить VPN", callback_data="vpn:get")],
         [InlineKeyboardButton(text="📘 Инструкция", callback_data="vpn:help"), InlineKeyboardButton(text="🛟 Поддержка", callback_data="vpn:support")],
+        [InlineKeyboardButton(text="❤️ Поддержать проект", callback_data="donate:home")],
     ])
 
 
@@ -159,6 +162,48 @@ async def send_subscription(target: Message | CallbackQuery, device: dict) -> No
         await target.answer_photo(photo, caption=caption, reply_markup=keyboard)
 
 
+async def send_star_invoice(message: Message, telegram_id: int, amount: int) -> None:
+    intent = await api("POST", f"/internal/users/{telegram_id}/donations/stars", json={"amount": amount})
+    await message.answer_invoice(
+        title="Поддержка Zaza VPN",
+        description="Добровольный донат на серверы и развитие проекта. Донат не открывает платные функции.",
+        payload=intent["invoice_payload"],
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label="Поддержать проект", amount=amount)],
+        start_parameter=f"support-zaza-{intent['id'][:8]}",
+    )
+
+
+async def show_donation_home(target: Message | CallbackQuery) -> None:
+    telegram_id = await ensure_user(target)
+    await api("POST", f"/internal/users/{telegram_id}/events", json={"event_type": "donation_open"})
+    summary = await api("GET", f"/internal/users/{telegram_id}/donations")
+    rows = [
+        [InlineKeyboardButton(text="⭐ 50", callback_data="donate:stars:50"), InlineKeyboardButton(text="⭐ 100", callback_data="donate:stars:100")],
+        [InlineKeyboardButton(text="⭐ 250", callback_data="donate:stars:250"), InlineKeyboardButton(text="⭐ 500", callback_data="donate:stars:500")],
+        [InlineKeyboardButton(text="✏️ Своя сумма Stars", callback_data="donate:stars:custom")],
+    ]
+    if summary.get("ton_enabled"):
+        rows.append([InlineKeyboardButton(text="💎 Поддержать в TON", callback_data="donate:ton")])
+    rows.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="donate:back")])
+    history = ""
+    if summary.get("donations"):
+        history = f"\n\nВаша поддержка: <b>{summary['stars']} ⭐</b> и <b>{summary['ton']} TON</b>. Спасибо!"
+    text = (
+        "❤️ <b>Поддержать Zaza VPN</b>\n\n"
+        "Донаты идут на сервер, проверку VPN-конфигураций и развитие проекта. "
+        "Это добровольная поддержка: бесплатный VPN останется бесплатным."
+        f"{history}"
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=rows)
+    if isinstance(target, CallbackQuery):
+        await target.message.answer(text, reply_markup=markup)
+        await target.answer()
+    else:
+        await target.answer(text, reply_markup=markup)
+
+
 @dp.message(CommandStart())
 async def start(message: Message) -> None:
     telegram_id = await ensure_user(message)
@@ -167,6 +212,101 @@ async def start(message: Message) -> None:
     except Exception:
         logging.exception("Unable to record bot start analytics event")
     await message.answer("👋 <b>Добро пожаловать в Zaza VPN</b>\n\nБесплатный VPN с автоматическим выбором сильной ноды для Wi‑Fi и LTE.", reply_markup=menu())
+
+
+@dp.message(Command("donate"))
+async def donate_command(message: Message) -> None:
+    await show_donation_home(message)
+
+
+@dp.message(Command("terms"))
+async def terms_command(message: Message) -> None:
+    await message.answer(
+        "📄 <b>Условия поддержки Zaza VPN</b>\n\n"
+        "Донат является добровольной поддержкой проекта и не предоставляет платных функций, подписки или преимуществ. "
+        "Для вопросов по платежам используйте /paysupport. Возврат Stars рассматривается владельцем проекта по обращению."
+    )
+
+
+@dp.message(Command("paysupport"))
+async def payment_support_command(message: Message) -> None:
+    telegram_id = await ensure_user(message)
+    support_waiting.add(telegram_id)
+    await message.answer("Опишите проблему с платежом одним сообщением. Укажите сумму и примерное время, но не присылайте данные кошелька или банковской карты.")
+
+
+@dp.callback_query(F.data == "donate:home")
+async def donation_home_callback(callback: CallbackQuery) -> None:
+    await show_donation_home(callback)
+
+
+@dp.callback_query(F.data == "donate:back")
+async def donation_back_callback(callback: CallbackQuery) -> None:
+    await callback.message.answer("Главное меню", reply_markup=menu())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("donate:stars:"))
+async def donation_stars_callback(callback: CallbackQuery) -> None:
+    telegram_id = await ensure_user(callback)
+    value = callback.data.rsplit(":", 1)[-1]
+    if value == "custom":
+        donation_custom_waiting.add(telegram_id)
+        await callback.message.answer("Введите сумму от 1 до 10 000 Stars одним числом. Для отмены отправьте /cancel.")
+        await callback.answer()
+        return
+    try:
+        await send_star_invoice(callback.message, telegram_id, int(value))
+        await callback.answer()
+    except Exception as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@dp.callback_query(F.data == "donate:ton")
+async def donation_ton_callback(callback: CallbackQuery) -> None:
+    telegram_id = await ensure_user(callback)
+    try:
+        session = await api("POST", f"/internal/users/{telegram_id}/donations/ton")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Открыть TON-донат", url=session["url"])],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="donate:home")],
+        ])
+        await callback.message.answer("Подключите TON-кошелёк и подтвердите перевод. Zaza VPN никогда не запрашивает seed-фразу или приватный ключ.", reply_markup=keyboard)
+        await callback.answer()
+    except Exception as exc:
+        await callback.answer(str(exc), show_alert=True)
+
+
+@dp.pre_checkout_query()
+async def donation_pre_checkout(query: PreCheckoutQuery) -> None:
+    try:
+        await api("POST", f"/internal/users/{query.from_user.id}/donations/stars/precheckout", json={
+            "invoice_payload": query.invoice_payload,
+            "currency": query.currency,
+            "total_amount": query.total_amount,
+        })
+        await query.answer(ok=True)
+    except Exception as exc:
+        await query.answer(ok=False, error_message=str(exc)[:200])
+
+
+@dp.message(F.successful_payment)
+async def donation_success(message: Message) -> None:
+    if not message.from_user or not message.successful_payment:
+        return
+    payment = message.successful_payment
+    try:
+        result = await api("POST", f"/internal/users/{message.from_user.id}/donations/stars/complete", json={
+            "invoice_payload": payment.invoice_payload,
+            "currency": payment.currency,
+            "total_amount": payment.total_amount,
+            "telegram_payment_charge_id": payment.telegram_payment_charge_id,
+            "provider_payment_charge_id": payment.provider_payment_charge_id or None,
+        })
+        await message.answer(f"❤️ <b>Спасибо за поддержку!</b>\n\nПолучено <b>{result['amount']} ⭐</b>. Донат пойдёт на работу серверов и развитие Zaza VPN.", reply_markup=menu())
+    except Exception:
+        logging.exception("Unable to record successful Stars donation")
+        await message.answer("Платёж прошёл в Telegram, но подтверждение временно не записалось. Напишите /paysupport — платёж не потеряется.")
 
 
 async def show_admin_home(target: Message | CallbackQuery) -> None:
@@ -500,12 +640,29 @@ async def state_message(message: Message) -> None:
     raw_text = message.text or message.caption or ""
     if raw_text == "/cancel":
         support_waiting.discard(telegram_id)
+        donation_custom_waiting.discard(telegram_id)
         admin_reply_waiting.pop(telegram_id, None)
         admin_user_search_waiting.discard(telegram_id)
         admin_broadcast_waiting.discard(telegram_id)
         admin_broadcast_buttons_waiting.discard(telegram_id)
         admin_broadcast_drafts.pop(telegram_id, None)
         await message.answer("Действие отменено.", reply_markup=menu())
+        return
+
+    if telegram_id in donation_custom_waiting:
+        if not message.text or not message.text.strip().isdigit():
+            await message.answer("Введите целое число от 1 до 10 000 или отправьте /cancel.")
+            return
+        amount = int(message.text.strip())
+        if not 1 <= amount <= 10000:
+            await message.answer("Сумма должна быть от 1 до 10 000 Stars.")
+            return
+        donation_custom_waiting.discard(telegram_id)
+        try:
+            await send_star_invoice(message, telegram_id, amount)
+        except Exception as exc:
+            donation_custom_waiting.add(telegram_id)
+            await message.answer(f"Не удалось создать счёт: {escape(str(exc))}")
         return
 
     if telegram_id in admin_reply_waiting:

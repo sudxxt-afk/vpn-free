@@ -10,10 +10,12 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.main import claim_ticket, create_support_ticket, require_bot_admin, resolve_telegram_identity
-from app.models import AdminUser, Device, Role, TelegramUser
+from app.models import AdminUser, Device, Donation, Role, TelegramUser
 from app.schemas import BroadcastCreate, SupportTicketCreate
 from app.services.analytics import daily_retention_cohorts, sequential_funnel
 from app.services.broadcasts import _recipient_query, _send_delivery
+from app.services.donations import (DonationError, complete_star_donation, create_star_donation,
+                                    match_ton_transaction, validate_star_checkout)
 from app.services.telegram_html import sanitize_telegram_html
 
 
@@ -83,6 +85,39 @@ class AdminBotTests(unittest.TestCase):
         cohorts = daily_retention_cohorts([(first_user, now), (second_user, now)], activity, (now + timedelta(days=1)).date(), 2)
         today_cohort = next(item for item in cohorts if item["date"] == str(now.date()))
         self.assertEqual((today_cohort["users"], today_cohort["d0"], today_cohort["d1"]), (2, 100.0, 50.0))
+
+    def test_stars_donation_is_validated_and_idempotent(self):
+        with self.Session() as db:
+            user = TelegramUser(telegram_id=404, username="donor")
+            db.add(user); db.commit(); db.refresh(user)
+            item = create_star_donation(db, user, 100)
+            self.assertEqual(validate_star_checkout(db, user, item.invoice_payload, "XTR", 100).id, item.id)
+            with self.assertRaises(DonationError):
+                validate_star_checkout(db, user, item.invoice_payload, "XTR", 50)
+            paid = complete_star_donation(
+                db, user, invoice_payload=item.invoice_payload, currency="XTR", total_amount=100,
+                telegram_payment_charge_id="charge-1", provider_payment_charge_id=None,
+            )
+            self.assertEqual((paid.status, paid.amount_stars), ("paid", 100))
+            repeated = complete_star_donation(
+                db, user, invoice_payload=item.invoice_payload, currency="XTR", total_amount=100,
+                telegram_payment_charge_id="charge-1", provider_payment_charge_id=None,
+            )
+            self.assertEqual(repeated.id, item.id)
+
+    def test_ton_match_requires_reference_amount_and_fresh_transaction(self):
+        now = datetime.now(timezone.utc)
+        item = Donation(user_id=UUID(int=7), method="ton", status="pending", amount_nano=1_000_000_000,
+                        reference="zaza-reference", created_at=now)
+        wrong = [{"utime": int(now.timestamp()), "transaction_id": {"hash": "wrong"},
+                  "in_msg": {"value": "1000000000", "message": "another", "source": "sender"}}]
+        self.assertIsNone(match_ton_transaction(item, wrong))
+        underpaid = [{"utime": int(now.timestamp()), "transaction_id": {"hash": "underpaid"},
+                      "in_msg": {"value": "999999999", "message": "zaza-reference", "source": "sender"}}]
+        self.assertIsNone(match_ton_transaction(item, underpaid))
+        valid = [{"utime": int(now.timestamp()), "transaction_id": {"hash": "tx-1"},
+                  "in_msg": {"value": "1000000000", "message": "zaza-reference", "source": "sender"}}]
+        self.assertEqual(match_ton_transaction(item, valid), {"tx_hash": "tx-1", "sender": "sender", "value": 1_000_000_000})
 
 
 class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):

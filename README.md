@@ -43,3 +43,11 @@ The web owner manages administrators in the **Administrators** section. Bind an 
 Bound administrators open the operator panel with `/admin`. It includes support tickets, user lookup and blocking, pool/source status, manual source refreshes, and durable segmented broadcasts. Broadcasts accept Telegram HTML formatting, either text or one photo, and up to six configurable URL buttons. A draft can be sent to administrators as a safe test before the worker delivers it from the PostgreSQL-backed queue.
 
 The web analytics section shows a strict `/start → VPN issued → landing opened → HAPP import started → subscription used` funnel and 14 daily acquisition cohorts with exact-day D0, D1, D3, and D7 retention.
+
+## Voluntary donations
+
+The bot menu and `/donate` command open voluntary project support. Telegram Stars are available with preset and custom amounts. A donation is recorded only after Telegram sends `successful_payment`; repeated delivery of the same payment event is idempotent. `/terms` explains the voluntary nature of support and `/paysupport` opens a support ticket for payment questions. Donations never unlock VPN features.
+
+TON support is optional. Set `TON_DONATION_ADDRESS` to a public TON wallet address to enable the button and the TON Connect page. `TONCENTER_BASE_URL` defaults to TON Center API v2; `TONCENTER_API_KEY` is optional but recommended for production limits. The backend confirms an inbound transaction by its unique comment, full expected amount, freshness, and transaction hash before recording it. Never store or provide a wallet seed phrase or private key to this service.
+
+The web analytics page reports donation-section opens, unique supporters, Stars totals, and verified TON totals.

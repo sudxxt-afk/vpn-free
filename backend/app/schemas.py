@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -139,7 +140,7 @@ class LandingEventPayload(BaseModel):
 
 
 class InternalEventPayload(BaseModel):
-    event_type: str = Field(pattern="^(bot_start|vpn_issued)$")
+    event_type: str = Field(pattern="^(bot_start|vpn_issued|donation_open)$")
 
 
 class SupportTicketCreate(BaseModel):
@@ -210,8 +211,33 @@ class AnalyticsResponse(BaseModel):
     happ_launches: int
     vpn_issued: int
     subscription_opens: int
+    donation_opens: int
+    donation_supporters: int
+    donation_stars_count: int
+    donation_stars_total: int
+    donation_ton_count: int
+    donation_ton_total: float
     days: list[AnalyticsDayResponse]
     cohorts: list[AnalyticsCohortResponse]
+
+
+class StarDonationIntent(BaseModel):
+    amount: int = Field(ge=1, le=10000)
+
+
+class StarDonationPreCheckout(BaseModel):
+    invoice_payload: str = Field(min_length=1, max_length=128)
+    currency: str = Field(pattern="^XTR$")
+    total_amount: int = Field(ge=1, le=10000)
+
+
+class StarDonationComplete(StarDonationPreCheckout):
+    telegram_payment_charge_id: str = Field(min_length=1, max_length=255)
+    provider_payment_charge_id: str | None = Field(default=None, max_length=255)
+
+
+class TonDonationPrepare(BaseModel):
+    amount: Decimal = Field(ge=Decimal("0.1"), le=Decimal("100"), decimal_places=3)
 
 
 class BotUserRequest(BaseModel):

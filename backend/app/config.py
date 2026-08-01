@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     alert_cooldown_minutes: int = 60
     node_drop_alert_ratio: float = 0.5
     tls_alert_days: int = 14
+    ton_donation_address: str = ""
+    toncenter_base_url: str = "https://toncenter.com/api/v2"
+    toncenter_api_key: str = ""
 
     @property
     def admin_ids(self) -> set[int]:
