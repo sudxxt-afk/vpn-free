@@ -45,4 +45,3 @@ class BroadcastDraftStore:
 
     async def close(self) -> None:
         await self.redis.aclose()
-
