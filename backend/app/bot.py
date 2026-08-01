@@ -75,14 +75,29 @@ def broadcast_markup(draft: dict) -> InlineKeyboardMarkup | None:
 
 def broadcast_segment_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Активные", callback_data="adm:segment:active"), InlineKeyboardButton(text="Все известные", callback_data="adm:segment:all")],
-        [InlineKeyboardButton(text="С устройствами", callback_data="adm:segment:with_devices"), InlineKeyboardButton(text="Без устройств", callback_data="adm:segment:without_devices")],
+        [InlineKeyboardButton(text="Активные", callback_data="adm:bc:segment:active"), InlineKeyboardButton(text="Все известные", callback_data="adm:bc:segment:all")],
+        [InlineKeyboardButton(text="С устройствами", callback_data="adm:bc:segment:with_devices"), InlineKeyboardButton(text="Без устройств", callback_data="adm:bc:segment:without_devices")],
         [InlineKeyboardButton(text="Отмена", callback_data="adm:broadcast")],
     ])
 
 
-async def ask_broadcast_segment(message: Message) -> None:
-    await message.answer("Выберите сегмент получателей:", reply_markup=broadcast_segment_markup())
+def broadcast_buttons_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Добавить кнопки", callback_data="adm:bc:buttons")],
+        [InlineKeyboardButton(text="➡️ Без кнопок", callback_data="adm:bc:no-buttons")],
+        [InlineKeyboardButton(text="⬅️ Изменить сообщение", callback_data="adm:bc:edit:content")],
+        [InlineKeyboardButton(text="Отмена", callback_data="adm:broadcast")],
+    ])
+
+
+def broadcast_preview_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧪 Отправить тест админам", callback_data="adm:bc:test")],
+        [InlineKeyboardButton(text="🚀 Подтвердить отправку", callback_data="adm:bc:confirm")],
+        [InlineKeyboardButton(text="✏️ Сообщение", callback_data="adm:bc:edit:content"), InlineKeyboardButton(text="👥 Сегмент", callback_data="adm:bc:edit:segment")],
+        [InlineKeyboardButton(text="🔗 Кнопки", callback_data="adm:bc:edit:buttons")],
+        [InlineKeyboardButton(text="Отмена", callback_data="adm:broadcast")],
+    ])
 
 
 async def show_broadcast_preview(target: Message | CallbackQuery, draft: dict) -> None:
@@ -95,14 +110,9 @@ async def show_broadcast_preview(target: Message | CallbackQuery, draft: dict) -
         await message.answer_photo(draft["photo_file_id"], caption=draft.get("text_html") or None, reply_markup=markup)
     else:
         await message.answer(draft["text_html"], disable_web_page_preview=True, reply_markup=markup)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧪 Отправить тест админам", callback_data="adm:broadcast:test")],
-        [InlineKeyboardButton(text="🚀 Подтвердить отправку", callback_data="adm:broadcast:confirm")],
-        [InlineKeyboardButton(text="Отмена", callback_data="adm:broadcast")],
-    ])
     await message.answer(
         f"Сегмент: <b>{draft['segment']}</b>\nПроверьте сообщение выше и подтвердите рассылку.",
-        reply_markup=keyboard,
+        reply_markup=broadcast_preview_markup(),
     )
 
 
@@ -520,7 +530,17 @@ async def admin_broadcast_new(callback: CallbackQuery) -> None:
         await api("GET", f"/internal/admin/{callback.from_user.id}/dashboard")
         await clear_interactive_state(callback.from_user.id)
         await broadcast_drafts.begin(callback.from_user.id)
-        await callback.message.answer("Выберите сегмент получателей:", reply_markup=broadcast_segment_markup())
+        await callback.message.answer(
+            "Пришлите сообщение для рассылки. Формат определяется автоматически:\n"
+            "• текст — текстовая рассылка;\n"
+            "• фото — рассылка с фото;\n"
+            "• фото с подписью — фото и текст.\n\n"
+            "Поддерживается Telegram HTML: <code>&lt;b&gt;жирный&lt;/b&gt;</code>, "
+            "<code>&lt;i&gt;курсив&lt;/i&gt;</code>, <code>&lt;u&gt;подчёркнутый&lt;/u&gt;</code>, "
+            "<code>&lt;s&gt;зачёркнутый&lt;/s&gt;</code>, <code>&lt;tg-spoiler&gt;спойлер&lt;/tg-spoiler&gt;</code>, "
+            "<code>&lt;a href=\"https://site.ru\"&gt;ссылка&lt;/a&gt;</code>.\n\n"
+            "Документы, видео и голосовые сообщения не поддерживаются. /cancel — отмена."
+        )
         await callback.answer()
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -537,33 +557,85 @@ async def admin_broadcast_cancel(callback: CallbackQuery) -> None:
         await callback.answer(str(exc), show_alert=True)
 
 
-@dp.callback_query(F.data.startswith("adm:segment:"))
+@dp.callback_query(F.data.startswith("adm:bc:segment:"))
 async def admin_broadcast_segment(callback: CallbackQuery) -> None:
     assert callback.from_user and callback.data
     state = await broadcast_drafts.load(callback.from_user.id)
     if not state or state.get("stage") != "segment":
         await callback.answer("Черновик не найден, начните заново", show_alert=True)
         return
-    draft = state["draft"]
-    draft["segment"] = callback.data.rsplit(":", 1)[1]
-    state["stage"] = "content"
+    state["draft"]["segment"] = callback.data.rsplit(":", 1)[1]
+    state["stage"] = "buttons"
     await broadcast_drafts.save(callback.from_user.id, state)
     await callback.message.answer(
-        "Пришлите текст или одну фотографию с подписью. Поддерживается Telegram HTML:\n"
-        "<code>&lt;b&gt;жирный&lt;/b&gt;</code>, <code>&lt;i&gt;курсив&lt;/i&gt;</code>, "
-        "<code>&lt;u&gt;подчёркнутый&lt;/u&gt;</code>, <code>&lt;s&gt;зачёркнутый&lt;/s&gt;</code>, "
-        "<code>&lt;tg-spoiler&gt;спойлер&lt;/tg-spoiler&gt;</code>, <code>&lt;a href=\"https://site.ru\"&gt;ссылка&lt;/a&gt;</code>.\n"
-        "/cancel — отмена."
+        "Добавить кнопки со ссылками? Их можно пропустить.",
+        reply_markup=broadcast_buttons_markup(),
     )
     await callback.answer()
 
 
-@dp.callback_query(F.data == "adm:broadcast:test")
+@dp.callback_query(F.data == "adm:bc:buttons")
+async def admin_broadcast_add_buttons(callback: CallbackQuery) -> None:
+    assert callback.from_user
+    state = await broadcast_drafts.load(callback.from_user.id)
+    if not state or state.get("stage") != "buttons":
+        await callback.answer("Черновик не найден", show_alert=True)
+        return
+    await callback.message.answer(
+        "Пришлите до 6 кнопок: каждая строка в формате\n"
+        "<code>Текст кнопки | https://site.ru</code>\n\n"
+        "Можно отправить /skip, чтобы продолжить без кнопок."
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "adm:bc:no-buttons")
+async def admin_broadcast_skip_buttons(callback: CallbackQuery) -> None:
+    assert callback.from_user
+    state = await broadcast_drafts.load(callback.from_user.id)
+    if not state or state.get("stage") != "buttons":
+        await callback.answer("Черновик не найден", show_alert=True)
+        return
+    state["draft"]["buttons"] = []
+    state["stage"] = "preview"
+    await broadcast_drafts.save(callback.from_user.id, state)
+    await show_broadcast_preview(callback, state["draft"])
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("adm:bc:edit:"))
+async def admin_broadcast_edit(callback: CallbackQuery) -> None:
+    assert callback.from_user and callback.data
+    state = await broadcast_drafts.load(callback.from_user.id)
+    if not state:
+        await callback.answer("Черновик не найден", show_alert=True)
+        return
+    action = callback.data.rsplit(":", 1)[1]
+    if action == "content" and state.get("stage") in {"buttons", "preview"}:
+        state["draft"].update({"kind": None, "text_html": "", "photo_file_id": None, "buttons": []})
+        state["stage"] = "content"
+        await broadcast_drafts.save(callback.from_user.id, state)
+        await callback.message.answer("Пришлите новое сообщение: текст, фото или фото с подписью.")
+    elif action == "segment" and state.get("stage") == "preview":
+        state["stage"] = "segment"
+        await broadcast_drafts.save(callback.from_user.id, state)
+        await callback.message.answer("Выберите новый сегмент получателей:", reply_markup=broadcast_segment_markup())
+    elif action == "buttons" and state.get("stage") == "preview":
+        state["stage"] = "buttons"
+        await broadcast_drafts.save(callback.from_user.id, state)
+        await callback.message.answer("Измените кнопки или пропустите их:", reply_markup=broadcast_buttons_markup())
+    else:
+        await callback.answer("Этот шаг уже недоступен", show_alert=True)
+        return
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "adm:bc:test")
 async def admin_broadcast_test(callback: CallbackQuery) -> None:
     assert callback.from_user
     state = await broadcast_drafts.load(callback.from_user.id)
-    if not state or state.get("stage") != "confirm":
-        await callback.answer("Черновик не найден", show_alert=True)
+    if not state or state.get("stage") != "preview":
+        await callback.answer("Сначала соберите рассылку и откройте предпросмотр", show_alert=True)
         return
     draft = state["draft"]
     try:
@@ -584,33 +656,29 @@ async def admin_broadcast_test(callback: CallbackQuery) -> None:
         await callback.answer(str(exc), show_alert=True)
 
 
-@dp.callback_query(F.data == "adm:broadcast:skip")
-async def admin_broadcast_skip_buttons(callback: CallbackQuery) -> None:
-    assert callback.from_user
-    state = await broadcast_drafts.load(callback.from_user.id)
-    if not state or state.get("stage") != "buttons":
-        await callback.answer("Черновик не найден", show_alert=True)
-        return
-    state["draft"]["buttons"] = []
-    state["stage"] = "confirm"
-    await broadcast_drafts.save(callback.from_user.id, state)
-    await show_broadcast_preview(callback, state["draft"])
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "adm:broadcast:confirm")
+@dp.callback_query(F.data == "adm:bc:confirm")
 async def admin_broadcast_confirm(callback: CallbackQuery) -> None:
     assert callback.from_user
     state = await broadcast_drafts.load(callback.from_user.id)
     draft = state.get("draft") if state else None
-    if not state or state.get("stage") != "confirm" or not draft or not draft.get("segment"):
-        await callback.answer("Черновик не найден", show_alert=True)
+    if not state or state.get("stage") != "preview" or not draft or not draft.get("segment"):
+        await callback.answer("Сначала соберите рассылку и откройте предпросмотр", show_alert=True)
         return
     try:
-        payload = {**draft, "client_request_id": state["client_request_id"]}
+        payload = {
+            "client_request_id": state["client_request_id"],
+            "segment": draft["segment"],
+            "text_html": draft.get("text_html") or "",
+            "photo_file_id": draft.get("photo_file_id"),
+            "buttons": draft.get("buttons") or [],
+        }
         result = await api("POST", f"/internal/admin/{callback.from_user.id}/broadcasts", json=payload)
         await broadcast_drafts.clear(callback.from_user.id)
-        await callback.message.answer(f"✅ Рассылка <code>{result['id'][:8]}</code> поставлена в очередь.", reply_markup=admin_menu())
+        await callback.message.answer(
+            f"✅ Рассылка <code>{result['id'][:8]}</code> поставлена в очередь. "
+            "После завершения я пришлю полный отчёт по доставке.",
+            reply_markup=admin_menu(),
+        )
         await callback.answer("Рассылка запущена")
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
@@ -745,9 +813,48 @@ async def state_message(message: Message) -> None:
         return
 
     broadcast_state = await broadcast_drafts.load(telegram_id)
+    if broadcast_state and broadcast_state.get("stage") == "content":
+        if message.photo:
+            photo_file_id = message.photo[-1].file_id
+            source_text = raw_text
+            if source_text and not ("<" in source_text and ">" in source_text):
+                source_text = message.html_caption or source_text
+            clean = sanitize_telegram_html(source_text)
+            if len(clean) > 1024:
+                await message.answer("Подпись к фото превышает лимит Telegram: 1024 символа.")
+                return
+            kind = "photo_caption" if clean else "photo"
+        elif message.text:
+            photo_file_id = None
+            source_text = message.text
+            if source_text and not ("<" in source_text and ">" in source_text):
+                source_text = message.html_text or source_text
+            clean = sanitize_telegram_html(source_text)
+            if not clean or len(clean) > 4096:
+                await message.answer("Текст пустой или превышает лимит Telegram: 4096 символов.")
+                return
+            kind = "text"
+        else:
+            await message.answer("Пришлите текст, фото или фото с подписью. Документы, видео и голосовые сообщения не поддерживаются.")
+            return
+        broadcast_state["draft"].update({
+            "kind": kind,
+            "text_html": clean,
+            "photo_file_id": photo_file_id,
+            "buttons": [],
+        })
+        broadcast_state["stage"] = "segment"
+        await broadcast_drafts.save(telegram_id, broadcast_state)
+        content_label = {"text": "текст", "photo": "фото", "photo_caption": "фото с подписью"}[kind]
+        await message.answer(
+            f"✅ Получено: <b>{content_label}</b>. Теперь выберите сегмент получателей:",
+            reply_markup=broadcast_segment_markup(),
+        )
+        return
+
     if broadcast_state and broadcast_state.get("stage") == "buttons":
         if not message.text:
-            await message.answer("Пришлите кнопки текстом или отправьте /skip.")
+            await message.answer("Пришлите кнопки текстом или нажмите «Без кнопок».")
             return
         buttons = []
         if message.text.strip() != "/skip":
@@ -766,39 +873,9 @@ async def state_message(message: Message) -> None:
                 await message.answer("Неверный формат. Каждая строка: <code>Текст кнопки | https://site.ru</code>")
                 return
         broadcast_state["draft"]["buttons"] = buttons
-        broadcast_state["stage"] = "confirm"
+        broadcast_state["stage"] = "preview"
         await broadcast_drafts.save(telegram_id, broadcast_state)
         await show_broadcast_preview(message, broadcast_state["draft"])
-        return
-
-    if broadcast_state and broadcast_state.get("stage") == "content":
-        if not broadcast_state.get("draft", {}).get("segment"):
-            broadcast_state["stage"] = "segment"
-            await broadcast_drafts.save(telegram_id, broadcast_state)
-            await message.answer("Обновил черновик. Сначала выберите сегмент получателей:", reply_markup=broadcast_segment_markup())
-            return
-        if not message.text and not message.photo:
-            await message.answer("Пришлите текст либо одну фотографию с подписью. Документы, голосовые и видео для рассылки не поддерживаются.")
-            return
-        photo_file_id = message.photo[-1].file_id if message.photo else None
-        source_text = raw_text
-        if source_text and not ("<" in source_text and ">" in source_text):
-            source_text = message.html_text if message.text else (message.html_caption or source_text)
-        clean = sanitize_telegram_html(source_text)
-        max_length = 1024 if photo_file_id else 4096
-        if len(clean) > max_length or (not clean and not photo_file_id):
-            await message.answer(f"Сообщение пустое или превышает лимит {max_length} символов.")
-            return
-        broadcast_state["draft"] = {"text_html": clean, "photo_file_id": photo_file_id, "buttons": []}
-        broadcast_state["stage"] = "buttons"
-        await broadcast_drafts.save(telegram_id, broadcast_state)
-        await message.answer(
-            "Добавьте кнопки: каждая строка в формате\n<code>Текст кнопки | https://site.ru</code>\n\nДо 6 кнопок.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⏭ Без кнопок", callback_data="adm:broadcast:skip")],
-                [InlineKeyboardButton(text="Отмена", callback_data="adm:broadcast")],
-            ]),
-        )
         return
 
     if telegram_id not in support_waiting:

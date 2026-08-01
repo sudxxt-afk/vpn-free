@@ -19,9 +19,18 @@ class BroadcastDraftStore:
 
     async def begin(self, telegram_id: int) -> dict:
         state = {
-            "stage": "segment",
+            # The message type is inferred from the next Telegram message:
+            # text, photo, or photo with a caption.  The whole draft still
+            # lives in Redis, so a bot restart cannot lose it.
+            "stage": "content",
             "client_request_id": str(uuid.uuid4()),
-            "draft": {"text_html": "", "photo_file_id": None, "buttons": []},
+            "draft": {
+                "kind": None,
+                "segment": None,
+                "text_html": "",
+                "photo_file_id": None,
+                "buttons": [],
+            },
         }
         await self.save(telegram_id, state)
         return state

@@ -161,12 +161,28 @@ class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
 
         first = BroadcastDraftStore(FakeRedis())
         state = await first.begin(501)
-        self.assertEqual(state["stage"], "segment")
+        self.assertEqual((state["stage"], state["draft"]["kind"]), ("content", None))
         state["draft"]["text_html"] = "<b>Сохранено</b>"
-        state["stage"] = "content"
+        state["draft"]["kind"] = "photo_caption"
+        state["stage"] = "segment"
         await first.save(501, state)
         restored = await BroadcastDraftStore(FakeRedis()).load(501)
-        self.assertEqual((restored["stage"], restored["draft"]["text_html"]), ("content", "<b>Сохранено</b>"))
+        self.assertEqual(
+            (restored["stage"], restored["draft"]["kind"], restored["draft"]["text_html"]),
+            ("segment", "photo_caption", "<b>Сохранено</b>"),
+        )
+
+    async def test_photo_delivery_allows_empty_or_formatted_caption(self):
+        campaign = SimpleNamespace(
+            photo_file_id="telegram-file-id",
+            text_html="<b>Подпись</b>",
+            buttons_json="[]",
+        )
+        bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
+        await _send_delivery(bot, campaign, 777)
+        bot.send_photo.assert_awaited_once()
+        self.assertEqual(bot.send_photo.await_args.args, (777, "telegram-file-id"))
+        self.assertEqual(bot.send_photo.await_args.kwargs["caption"], "<b>Подпись</b>")
 
     async def test_worker_completes_persisted_campaign(self):
         engine = create_engine("sqlite:///:memory:")
