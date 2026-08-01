@@ -20,6 +20,7 @@ from app.services.telegram import has_required_memberships
 from app.services.broadcasts import process_broadcasts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 settings = get_settings()
 
 
