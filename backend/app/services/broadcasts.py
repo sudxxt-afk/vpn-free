@@ -1,10 +1,12 @@
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import exists, func, select
 
 from app.config import get_settings
@@ -45,10 +47,14 @@ def _prepare_deliveries(campaign_id) -> None:
 
 
 async def _send_delivery(bot: Bot, campaign: BroadcastCampaign, chat_id: int) -> None:
+    buttons = json.loads(campaign.buttons_json or "[]")
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=item["text"], url=item["url"])] for item in buttons
+    ]) if buttons else None
     if campaign.photo_file_id:
-        await bot.send_photo(chat_id, campaign.photo_file_id, caption=campaign.text_html or None)
+        await bot.send_photo(chat_id, campaign.photo_file_id, caption=campaign.text_html or None, reply_markup=markup)
     else:
-        await bot.send_message(chat_id, campaign.text_html, disable_web_page_preview=True)
+        await bot.send_message(chat_id, campaign.text_html, disable_web_page_preview=True, reply_markup=markup)
 
 
 async def _process_campaign(campaign_id) -> None:

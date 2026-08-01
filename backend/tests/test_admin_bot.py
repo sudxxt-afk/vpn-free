@@ -1,5 +1,8 @@
 import unittest
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from uuid import UUID
+from unittest.mock import AsyncMock
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -8,8 +11,9 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.main import claim_ticket, create_support_ticket, require_bot_admin, resolve_telegram_identity
 from app.models import AdminUser, Device, Role, TelegramUser
-from app.schemas import SupportTicketCreate
-from app.services.broadcasts import _recipient_query
+from app.schemas import BroadcastCreate, SupportTicketCreate
+from app.services.analytics import daily_retention_cohorts, sequential_funnel
+from app.services.broadcasts import _recipient_query, _send_delivery
 from app.services.telegram_html import sanitize_telegram_html
 
 
@@ -61,6 +65,35 @@ class AdminBotTests(unittest.TestCase):
         self.assertIn("<b>Жирный</b>", clean)
         self.assertNotIn("javascript", clean)
         self.assertIn('href="https://example.com"', clean)
+
+    def test_sequential_funnel_and_daily_retention(self):
+        now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+        first_user, second_user = UUID(int=1), UUID(int=2)
+        events = [
+            SimpleNamespace(telegram_user_id=first_user, event_type=name, created_at=now + timedelta(minutes=index))
+            for index, name in enumerate(("bot_start", "vpn_issued", "site_visit", "happ_launch", "subscription_open"))
+        ]
+        events += [
+            SimpleNamespace(telegram_user_id=second_user, event_type="bot_start", created_at=now),
+            SimpleNamespace(telegram_user_id=second_user, event_type="site_visit", created_at=now + timedelta(minutes=1)),
+        ]
+        funnel = sequential_funnel(events, now - timedelta(minutes=1))
+        self.assertEqual(funnel, {"bot_start": 2, "vpn_issued": 1, "site_visit": 1, "happ_launch": 1, "subscription_open": 1})
+        activity = events + [SimpleNamespace(telegram_user_id=first_user, event_type="subscription_open", created_at=now + timedelta(days=1))]
+        cohorts = daily_retention_cohorts([(first_user, now), (second_user, now)], activity, (now + timedelta(days=1)).date(), 2)
+        today_cohort = next(item for item in cohorts if item["date"] == str(now.date()))
+        self.assertEqual((today_cohort["users"], today_cohort["d0"], today_cohort["d1"]), (2, 100.0, 50.0))
+
+
+class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
+    async def test_buttons_are_attached_to_text_delivery(self):
+        payload = BroadcastCreate(segment="active", text_html="<b>Новость</b>", buttons=[{"text": "Открыть", "url": "https://example.com"}])
+        campaign = SimpleNamespace(photo_file_id=None, text_html=payload.text_html,
+                                   buttons_json='[{"text":"Открыть","url":"https://example.com"}]')
+        bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock())
+        await _send_delivery(bot, campaign, 123)
+        bot.send_message.assert_awaited_once()
+        self.assertEqual(bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard[0][0].url, "https://example.com")
 
 
 if __name__ == "__main__":

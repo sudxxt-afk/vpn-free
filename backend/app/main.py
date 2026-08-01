@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import json
 from uuid import UUID
 
 import httpx
@@ -16,7 +17,7 @@ from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, 
                         Node, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceRun, SupportMessage, SupportTicket, TelegramUser)
 from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLookup, BotUserRequest, BroadcastCreate, ChannelCreate, ChannelResponse, DashboardResponse,
                          DeviceCreate, DeviceResponse, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
-                         AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
+                         AnalyticsCohortResponse, AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
                          NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, SupportReplyPayload, SupportTicketCreate)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_github_url, refresh_source
@@ -25,6 +26,7 @@ from app.services.telegram import has_required_memberships, validate_bot_admin
 from app.services.subgram import get_partner_access
 from app.services.rate_limit import is_allowed
 from app.services.telegram_html import sanitize_telegram_html
+from app.services.analytics import daily_retention_cohorts, sequential_funnel
 
 settings = get_settings()
 
@@ -41,6 +43,7 @@ def bootstrap() -> None:
             db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS telegram_username VARCHAR(128)"))
             db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS support_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
             db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_admin_users_telegram_id ON admin_users (telegram_id) WHERE telegram_id IS NOT NULL"))
+            db.execute(text("ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]'"))
             db.commit()
         exists = db.scalar(select(AdminUser).where(AdminUser.login == settings.initial_admin_login))
         if not exists:
@@ -244,7 +247,8 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
     days = max(7, min(days, 90))
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days - 1)
-    events = db.scalars(select(AnalyticsEvent).where(AnalyticsEvent.created_at >= now - timedelta(days=30)).order_by(AnalyticsEvent.created_at)).all()
+    events_from = min(start, now - timedelta(days=30))
+    events = db.scalars(select(AnalyticsEvent).where(AnalyticsEvent.created_at >= events_from).order_by(AnalyticsEvent.created_at)).all()
     points = {str((start + timedelta(days=offset)).date()): {"bot_starts": 0, "site_visits": 0, "happ_launches": 0, "vpn_issued": 0, "subscription_opens": 0} for offset in range(days)}
     event_fields = {"bot_start": "bot_starts", "site_visit": "site_visits", "happ_launch": "happ_launches", "vpn_issued": "vpn_issued", "subscription_open": "subscription_opens"}
     for event in events:
@@ -252,10 +256,17 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
         field = event_fields.get(event.event_type)
         if key in points and field:
             points[key][field] += 1
-    count = lambda name: sum(1 for event in events if event.event_type == name)
+    count = lambda name: sum(1 for event in events if event.created_at >= start and event.event_type == name)
     def unique_users(event_types: set[str], since: datetime) -> int:
         return len({event.telegram_user_id for event in events if event.created_at >= since and event.event_type in event_types and event.telegram_user_id is not None})
     active_types = {"bot_start", "site_visit", "happ_launch", "vpn_issued", "subscription_open"}
+    funnel = sequential_funnel(events, start)
+    first_starts = db.execute(
+        select(AnalyticsEvent.telegram_user_id, func.min(AnalyticsEvent.created_at))
+        .where(AnalyticsEvent.event_type == "bot_start", AnalyticsEvent.telegram_user_id.is_not(None))
+        .group_by(AnalyticsEvent.telegram_user_id)
+    ).all()
+    cohorts = daily_retention_cohorts(first_starts, events, now.date(), cohort_days=min(days, 14))
     return AnalyticsResponse(
         total_bot_users=db.scalar(select(func.count()).select_from(TelegramUser)) or 0,
         new_bot_users=db.scalar(select(func.count()).select_from(TelegramUser).where(TelegramUser.created_at >= start)) or 0,
@@ -264,16 +275,18 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
         active_users_7d=unique_users(active_types, now - timedelta(days=7)),
         active_users_30d=unique_users(active_types, now - timedelta(days=30)),
         active_devices=db.scalar(select(func.count()).select_from(Device).where(Device.is_revoked.is_(False))) or 0,
-        funnel_bot_users=unique_users({"bot_start"}, start),
-        funnel_site_users=unique_users({"site_visit"}, start),
-        funnel_happ_users=unique_users({"happ_launch"}, start),
-        funnel_subscription_users=unique_users({"subscription_open"}, start),
+        funnel_bot_users=funnel["bot_start"],
+        funnel_vpn_users=funnel["vpn_issued"],
+        funnel_site_users=funnel["site_visit"],
+        funnel_happ_users=funnel["happ_launch"],
+        funnel_subscription_users=funnel["subscription_open"],
         bot_starts=count("bot_start"),
         unique_site_visitors=len({event.device_id for event in events if event.event_type == "site_visit" and event.device_id is not None}),
         happ_launches=count("happ_launch"),
         vpn_issued=count("vpn_issued"),
         subscription_opens=count("subscription_open"),
         days=[AnalyticsDayResponse(date=date, **values) for date, values in points.items()],
+        cohorts=[AnalyticsCohortResponse(**item) for item in cohorts],
     )
 
 
@@ -604,7 +617,8 @@ def ticket_payload(db: Session, ticket: SupportTicket) -> dict:
 
 def campaign_payload(item: BroadcastCampaign) -> dict:
     return {"id": str(item.id), "segment": item.segment, "status": item.status, "text_html": item.text_html,
-            "has_photo": bool(item.photo_file_id), "total_count": item.total_count, "sent_count": item.sent_count,
+            "has_photo": bool(item.photo_file_id), "button_count": len(json.loads(item.buttons_json or "[]")),
+            "total_count": item.total_count, "sent_count": item.sent_count,
             "failed_count": item.failed_count, "skipped_count": item.skipped_count,
             "created_at": item.created_at.isoformat() if item.created_at else None}
 
@@ -769,6 +783,14 @@ def admin_broadcasts(telegram_id: int, db: Session = Depends(get_db)) -> list[di
     return [campaign_payload(item) for item in db.scalars(select(BroadcastCampaign).order_by(BroadcastCampaign.created_at.desc()).limit(10)).all()]
 
 
+@app.get("/internal/admin/{telegram_id}/broadcasts/test-recipients", dependencies=[Depends(require_internal)])
+def broadcast_test_recipients(telegram_id: int, db: Session = Depends(get_db)) -> list[int]:
+    require_bot_admin(db, telegram_id)
+    return list(db.scalars(select(AdminUser.telegram_id).where(
+        AdminUser.is_active.is_(True), AdminUser.telegram_id.is_not(None),
+        AdminUser.role.in_([Role.OWNER, Role.ADMIN]))).all())
+
+
 @app.post("/internal/admin/{telegram_id}/broadcasts", dependencies=[Depends(require_internal)])
 def create_broadcast(telegram_id: int, payload: BroadcastCreate, db: Session = Depends(get_db)) -> dict:
     admin = require_bot_admin(db, telegram_id)
@@ -778,8 +800,9 @@ def create_broadcast(telegram_id: int, payload: BroadcastCreate, db: Session = D
         raise HTTPException(status_code=422, detail=f"Текст превышает лимит Telegram: {max_length} символов")
     if not clean and not payload.photo_file_id:
         raise HTTPException(status_code=422, detail="Рассылка не может быть пустой")
+    buttons_json = json.dumps([button.model_dump() for button in payload.buttons], ensure_ascii=False)
     item = BroadcastCampaign(author_admin_id=admin.id, segment=payload.segment, text_html=clean,
-                             photo_file_id=payload.photo_file_id)
+                             photo_file_id=payload.photo_file_id, buttons_json=buttons_json)
     db.add(item)
     db.flush()
     audit_admin(db, "broadcast.create", admin, f"{item.id}:{payload.segment}")

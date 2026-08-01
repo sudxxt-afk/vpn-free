@@ -2,7 +2,7 @@ import asyncio
 import io
 import logging
 from html import escape
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 import qrcode
@@ -22,6 +22,7 @@ support_waiting: set[int] = set()
 admin_reply_waiting: dict[int, str] = {}
 admin_user_search_waiting: set[int] = set()
 admin_broadcast_waiting: set[int] = set()
+admin_broadcast_buttons_waiting: set[int] = set()
 admin_broadcast_drafts: dict[int, dict] = {}
 
 
@@ -52,6 +53,22 @@ def ticket_text(ticket: dict) -> str:
         label = "Пользователь" if item["sender_type"] == "user" else "Администратор"
         lines.append(f"<b>{label}:</b> {escape(item['text'])}")
     return "\n".join(lines)
+
+
+def broadcast_markup(draft: dict) -> InlineKeyboardMarkup | None:
+    buttons = draft.get("buttons") or []
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=item["text"], url=item["url"])] for item in buttons
+    ]) if buttons else None
+
+
+async def ask_broadcast_segment(message: Message) -> None:
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Активные", callback_data="adm:segment:active"), InlineKeyboardButton(text="Все известные", callback_data="adm:segment:all")],
+        [InlineKeyboardButton(text="С устройствами", callback_data="adm:segment:with_devices"), InlineKeyboardButton(text="Без устройств", callback_data="adm:segment:without_devices")],
+        [InlineKeyboardButton(text="Отмена", callback_data="adm:broadcast")],
+    ])
+    await message.answer("Выберите сегмент получателей:", reply_markup=keyboard)
 
 
 @dp.error()
@@ -354,16 +371,43 @@ async def admin_broadcast_segment(callback: CallbackQuery) -> None:
         await callback.answer("Черновик не найден, начните заново", show_alert=True)
         return
     draft["segment"] = callback.data.rsplit(":", 1)[1]
+    markup = broadcast_markup(draft)
     if draft.get("photo_file_id"):
-        await callback.message.answer_photo(draft["photo_file_id"], caption=draft.get("text_html") or None)
+        await callback.message.answer_photo(draft["photo_file_id"], caption=draft.get("text_html") or None, reply_markup=markup)
     else:
-        await callback.message.answer(draft["text_html"], disable_web_page_preview=True)
+        await callback.message.answer(draft["text_html"], disable_web_page_preview=True, reply_markup=markup)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧪 Отправить тест админам", callback_data="adm:broadcast:test")],
         [InlineKeyboardButton(text="🚀 Подтвердить отправку", callback_data="adm:broadcast:confirm")],
         [InlineKeyboardButton(text="Отмена", callback_data="adm:broadcast")],
     ])
     await callback.message.answer(f"Сегмент: <b>{draft['segment']}</b>\nПроверьте сообщение выше и подтвердите рассылку.", reply_markup=keyboard)
     await callback.answer()
+
+
+@dp.callback_query(F.data == "adm:broadcast:test")
+async def admin_broadcast_test(callback: CallbackQuery) -> None:
+    assert callback.from_user
+    draft = admin_broadcast_drafts.get(callback.from_user.id)
+    if not draft:
+        await callback.answer("Черновик не найден", show_alert=True)
+        return
+    try:
+        recipients = await api("GET", f"/internal/admin/{callback.from_user.id}/broadcasts/test-recipients")
+        markup = broadcast_markup(draft)
+        delivered = 0
+        for admin_id in recipients:
+            try:
+                if draft.get("photo_file_id"):
+                    await callback.bot.send_photo(admin_id, draft["photo_file_id"], caption=draft.get("text_html") or None, reply_markup=markup)
+                else:
+                    await callback.bot.send_message(admin_id, draft["text_html"], disable_web_page_preview=True, reply_markup=markup)
+                delivered += 1
+            except Exception:
+                logging.exception("Unable to deliver test broadcast to %s", admin_id)
+        await callback.answer(f"Тест доставлен администраторам: {delivered}/{len(recipients)}", show_alert=True)
+    except Exception as exc:
+        await callback.answer(str(exc), show_alert=True)
 
 
 @dp.callback_query(F.data == "adm:broadcast:confirm")
@@ -459,6 +503,7 @@ async def state_message(message: Message) -> None:
         admin_reply_waiting.pop(telegram_id, None)
         admin_user_search_waiting.discard(telegram_id)
         admin_broadcast_waiting.discard(telegram_id)
+        admin_broadcast_buttons_waiting.discard(telegram_id)
         admin_broadcast_drafts.pop(telegram_id, None)
         await message.answer("Действие отменено.", reply_markup=menu())
         return
@@ -497,6 +542,31 @@ async def state_message(message: Message) -> None:
             await message.answer(f"❌ {escape(str(exc))}", reply_markup=admin_menu())
         return
 
+    if telegram_id in admin_broadcast_buttons_waiting:
+        if not message.text:
+            await message.answer("Пришлите кнопки текстом или отправьте /skip.")
+            return
+        buttons = []
+        if message.text.strip() != "/skip":
+            lines = [line.strip() for line in message.text.splitlines() if line.strip()]
+            if len(lines) > 6:
+                await message.answer("Можно добавить не более 6 кнопок.")
+                return
+            try:
+                for line in lines:
+                    label, url = [part.strip() for part in line.split("|", 1)]
+                    parsed = urlparse(url)
+                    if not label or len(label) > 64 or parsed.scheme not in {"http", "https", "tg"} or (parsed.scheme != "tg" and not parsed.netloc):
+                        raise ValueError
+                    buttons.append({"text": label, "url": url})
+            except ValueError:
+                await message.answer("Неверный формат. Каждая строка: <code>Текст кнопки | https://site.ru</code>")
+                return
+        admin_broadcast_buttons_waiting.discard(telegram_id)
+        admin_broadcast_drafts[telegram_id]["buttons"] = buttons
+        await ask_broadcast_segment(message)
+        return
+
     if telegram_id in admin_broadcast_waiting:
         photo_file_id = message.photo[-1].file_id if message.photo else None
         source_text = raw_text
@@ -508,13 +578,9 @@ async def state_message(message: Message) -> None:
             await message.answer(f"Сообщение пустое или превышает лимит {max_length} символов.")
             return
         admin_broadcast_waiting.discard(telegram_id)
-        admin_broadcast_drafts[telegram_id] = {"text_html": clean, "photo_file_id": photo_file_id}
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Активные", callback_data="adm:segment:active"), InlineKeyboardButton(text="Все известные", callback_data="adm:segment:all")],
-            [InlineKeyboardButton(text="С устройствами", callback_data="adm:segment:with_devices"), InlineKeyboardButton(text="Без устройств", callback_data="adm:segment:without_devices")],
-            [InlineKeyboardButton(text="Отмена", callback_data="adm:broadcast")],
-        ])
-        await message.answer("Выберите сегмент получателей:", reply_markup=keyboard)
+        admin_broadcast_drafts[telegram_id] = {"text_html": clean, "photo_file_id": photo_file_id, "buttons": []}
+        admin_broadcast_buttons_waiting.add(telegram_id)
+        await message.answer("Добавьте кнопки: каждая строка в формате\n<code>Текст кнопки | https://site.ru</code>\n\nДо 6 кнопок. Если кнопки не нужны — /skip.")
         return
 
     if telegram_id not in support_waiting:

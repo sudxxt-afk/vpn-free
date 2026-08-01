@@ -40,4 +40,6 @@ VLESS, Shadowsocks, Trojan, VMess, Hysteria2 and TUIC.
 
 The web owner manages administrators in the **Administrators** section. Bind an existing bot user's Telegram ID or `@username`, choose the `owner` or `admin` role, and enable support access. The user must have started the bot before a username can be resolved.
 
-Bound administrators open the operator panel with `/admin`. It includes support tickets, user lookup and blocking, pool/source status, manual source refreshes, and durable segmented broadcasts. Broadcasts accept Telegram HTML formatting and either text or one photo with a formatted caption; the worker delivers them from the PostgreSQL-backed queue and resumes unfinished campaigns after a restart.
+Bound administrators open the operator panel with `/admin`. It includes support tickets, user lookup and blocking, pool/source status, manual source refreshes, and durable segmented broadcasts. Broadcasts accept Telegram HTML formatting, either text or one photo, and up to six configurable URL buttons. A draft can be sent to administrators as a safe test before the worker delivers it from the PostgreSQL-backed queue.
+
+The web analytics section shows a strict `/start → VPN issued → landing opened → HAPP import started → subscription used` funnel and 14 daily acquisition cohorts with exact-day D0, D1, D3, and D7 retention.

@@ -1,7 +1,8 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from urllib.parse import urlparse
 
 from app.models import NodeState, Role
 
@@ -153,10 +154,24 @@ class AdminUserLookup(BaseModel):
     query: str = Field(min_length=1, max_length=128)
 
 
+class BroadcastButtonPayload(BaseModel):
+    text: str = Field(min_length=1, max_length=64)
+    url: str = Field(min_length=5, max_length=2048)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        parsed = urlparse(value.strip())
+        if parsed.scheme not in {"http", "https", "tg"} or (parsed.scheme != "tg" and not parsed.netloc):
+            raise ValueError("Разрешены только ссылки http, https и tg")
+        return value.strip()
+
+
 class BroadcastCreate(BaseModel):
     segment: str = Field(pattern="^(active|all|with_devices|without_devices)$")
     text_html: str = Field(default="", max_length=4096)
     photo_file_id: str | None = Field(default=None, max_length=512)
+    buttons: list[BroadcastButtonPayload] = Field(default_factory=list, max_length=6)
 
 
 class AnalyticsDayResponse(BaseModel):
@@ -168,6 +183,15 @@ class AnalyticsDayResponse(BaseModel):
     subscription_opens: int = 0
 
 
+class AnalyticsCohortResponse(BaseModel):
+    date: str
+    users: int
+    d0: float | None = None
+    d1: float | None = None
+    d3: float | None = None
+    d7: float | None = None
+
+
 class AnalyticsResponse(BaseModel):
     total_bot_users: int
     new_bot_users: int
@@ -177,6 +201,7 @@ class AnalyticsResponse(BaseModel):
     active_users_30d: int
     active_devices: int
     funnel_bot_users: int
+    funnel_vpn_users: int
     funnel_site_users: int
     funnel_happ_users: int
     funnel_subscription_users: int
@@ -186,6 +211,7 @@ class AnalyticsResponse(BaseModel):
     vpn_issued: int
     subscription_opens: int
     days: list[AnalyticsDayResponse]
+    cohorts: list[AnalyticsCohortResponse]
 
 
 class BotUserRequest(BaseModel):

@@ -208,6 +208,7 @@ class BroadcastCampaign(Base):
     status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
     text_html: Mapped[str] = mapped_column(Text, default="")
     photo_file_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    buttons_json: Mapped[str] = mapped_column(Text, default="[]")
     total_count: Mapped[int] = mapped_column(Integer, default=0)
     sent_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
