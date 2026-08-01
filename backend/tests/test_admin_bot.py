@@ -13,7 +13,7 @@ from app.main import claim_ticket, create_broadcast, create_support_ticket, requ
 from app.models import AdminUser, BroadcastCampaign, Device, Donation, Role, TelegramUser
 from app.schemas import BroadcastCreate, SupportTicketCreate
 from app.services.analytics import daily_retention_cohorts, sequential_funnel
-from app.services.broadcasts import _recipient_query, _send_delivery
+from app.services.broadcasts import _recipient_query, _send_delivery, format_broadcast_report
 from app.services import broadcasts
 from app.services.broadcast_drafts import BroadcastDraftStore
 from app.services.donations import (DonationError, complete_star_donation, create_star_donation,
@@ -173,8 +173,10 @@ class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
         Session = sessionmaker(bind=engine)
         with Session() as db:
             user = TelegramUser(telegram_id=601, username="recipient")
-            campaign = BroadcastCampaign(client_request_id=uuid4(), segment="all", text_html="Проверка")
-            db.add_all([user, campaign]); db.commit(); campaign_id = campaign.id
+            author = AdminUser(login="author", password_hash="x", role=Role.ADMIN, telegram_id=602, is_active=True)
+            db.add_all([user, author]); db.flush()
+            campaign = BroadcastCampaign(client_request_id=uuid4(), author_admin_id=author.id, segment="all", text_html="Проверка")
+            db.add(campaign); db.commit(); campaign_id = campaign.id
         fake_bot = SimpleNamespace(send_message=AsyncMock(), send_photo=AsyncMock(),
                                    session=SimpleNamespace(close=AsyncMock()))
         with patch.object(broadcasts, "SessionLocal", Session), patch.object(broadcasts, "Bot", return_value=fake_bot):
@@ -183,8 +185,19 @@ class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
             result = db.get(BroadcastCampaign, campaign_id)
             self.assertEqual((result.status, result.total_count, result.sent_count, result.failed_count),
                              ("completed", 1, 1, 0))
-        fake_bot.send_message.assert_awaited_once()
+        self.assertEqual(fake_bot.send_message.await_count, 2)
+        self.assertIn("Рассылка завершена", fake_bot.send_message.await_args_list[1].args[1])
         engine.dispose()
+
+    async def test_broadcast_report_includes_delivery_outcomes(self):
+        report = format_broadcast_report({
+            "campaign_id": "deadbeef", "segment": "all", "total_count": 10,
+            "sent_count": 8, "failed_count": 1, "skipped_count": 1,
+            "duration": "2 сек", "errors": [("chat not found", 1)], "author_telegram_id": 1,
+        })
+        self.assertIn("Доставлено: <b>8</b>", report)
+        self.assertIn("Бот недоступен: <b>1</b>", report)
+        self.assertIn("chat not found — 1", report)
 
 
 if __name__ == "__main__":

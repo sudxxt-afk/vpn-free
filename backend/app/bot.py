@@ -27,6 +27,16 @@ donation_custom_waiting: set[int] = set()
 broadcast_drafts = BroadcastDraftStore()
 
 
+async def clear_interactive_state(telegram_id: int, *, keep_broadcast: bool = False) -> None:
+    """Do not let an abandoned flow capture input for a new one."""
+    support_waiting.discard(telegram_id)
+    donation_custom_waiting.discard(telegram_id)
+    admin_reply_waiting.pop(telegram_id, None)
+    admin_user_search_waiting.discard(telegram_id)
+    if not keep_broadcast:
+        await broadcast_drafts.clear(telegram_id)
+
+
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📨 Поддержка", callback_data="adm:tickets"), InlineKeyboardButton(text="👥 Пользователи", callback_data="adm:users")],
@@ -63,13 +73,16 @@ def broadcast_markup(draft: dict) -> InlineKeyboardMarkup | None:
     ]) if buttons else None
 
 
-async def ask_broadcast_segment(message: Message) -> None:
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+def broadcast_segment_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Активные", callback_data="adm:segment:active"), InlineKeyboardButton(text="Все известные", callback_data="adm:segment:all")],
         [InlineKeyboardButton(text="С устройствами", callback_data="adm:segment:with_devices"), InlineKeyboardButton(text="Без устройств", callback_data="adm:segment:without_devices")],
         [InlineKeyboardButton(text="Отмена", callback_data="adm:broadcast")],
     ])
-    await message.answer("Выберите сегмент получателей:", reply_markup=keyboard)
+
+
+async def ask_broadcast_segment(message: Message) -> None:
+    await message.answer("Выберите сегмент получателей:", reply_markup=broadcast_segment_markup())
 
 
 @dp.error()
@@ -330,6 +343,8 @@ async def show_admin_home(target: Message | CallbackQuery) -> None:
 @dp.message(Command("admin"))
 async def admin_command(message: Message) -> None:
     try:
+        if message.from_user:
+            await clear_interactive_state(message.from_user.id)
         await show_admin_home(message)
     except Exception as exc:
         await message.answer(f"⛔ {escape(str(exc))}")
@@ -458,11 +473,14 @@ async def admin_source_refresh(callback: CallbackQuery) -> None:
 async def admin_broadcast_callback(callback: CallbackQuery) -> None:
     assert callback.from_user
     try:
-        await broadcast_drafts.clear(callback.from_user.id)
+        await clear_interactive_state(callback.from_user.id)
         campaigns = await api("GET", f"/internal/admin/{callback.from_user.id}/broadcasts")
         lines = ["📣 <b>Рассылки</b>", "", "Последние кампании:"]
         for item in campaigns[:5]:
-            lines.append(f"• <code>{item['id'][:8]}</code> · {item['status']} · {item['sent_count']}/{item['total_count']}")
+            lines.append(
+                f"• <code>{item['id'][:8]}</code> · {item['status']} · "
+                f"✅ {item['sent_count']}/{item['total_count']} · ❌ {item['failed_count']} · 🚫 {item['skipped_count']}"
+            )
         rows = [[InlineKeyboardButton(text="➕ Создать рассылку", callback_data="adm:broadcast:new")]]
         rows.extend([[InlineKeyboardButton(text=f"⛔ Отменить {item['id'][:8]}", callback_data=f"adm:bcancel:{item['id']}")]
                      for item in campaigns if item["status"] in {"queued", "processing"}])
@@ -479,6 +497,7 @@ async def admin_broadcast_new(callback: CallbackQuery) -> None:
     assert callback.from_user
     try:
         await api("GET", f"/internal/admin/{callback.from_user.id}/dashboard")
+        await clear_interactive_state(callback.from_user.id)
         await broadcast_drafts.begin(callback.from_user.id)
         await callback.message.answer(
             "Пришлите текст или одну фотографию с подписью. Поддерживается Telegram HTML:\n"
@@ -552,6 +571,20 @@ async def admin_broadcast_test(callback: CallbackQuery) -> None:
         await callback.answer(f"Тест доставлен администраторам: {delivered}/{len(recipients)}", show_alert=True)
     except Exception as exc:
         await callback.answer(str(exc), show_alert=True)
+
+
+@dp.callback_query(F.data == "adm:broadcast:skip")
+async def admin_broadcast_skip_buttons(callback: CallbackQuery) -> None:
+    assert callback.from_user
+    state = await broadcast_drafts.load(callback.from_user.id)
+    if not state or state.get("stage") != "buttons":
+        await callback.answer("Черновик не найден", show_alert=True)
+        return
+    state["draft"]["buttons"] = []
+    state["stage"] = "segment"
+    await broadcast_drafts.save(callback.from_user.id, state)
+    await callback.message.answer("Выберите сегмент получателей:", reply_markup=broadcast_segment_markup())
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "adm:broadcast:confirm")
@@ -639,18 +672,14 @@ async def support_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@dp.message(F.text | F.photo)
+@dp.message()
 async def state_message(message: Message) -> None:
     if not message.from_user:
         return
     telegram_id = message.from_user.id
     raw_text = message.text or message.caption or ""
     if raw_text == "/cancel":
-        support_waiting.discard(telegram_id)
-        donation_custom_waiting.discard(telegram_id)
-        admin_reply_waiting.pop(telegram_id, None)
-        admin_user_search_waiting.discard(telegram_id)
-        await broadcast_drafts.clear(telegram_id)
+        await clear_interactive_state(telegram_id)
         await message.answer("Действие отменено.", reply_markup=menu())
         return
 
@@ -732,6 +761,9 @@ async def state_message(message: Message) -> None:
         return
 
     if broadcast_state and broadcast_state.get("stage") == "content":
+        if not message.text and not message.photo:
+            await message.answer("Пришлите текст либо одну фотографию с подписью. Документы, голосовые и видео для рассылки не поддерживаются.")
+            return
         photo_file_id = message.photo[-1].file_id if message.photo else None
         source_text = raw_text
         if source_text and not ("<" in source_text and ">" in source_text):
@@ -744,7 +776,13 @@ async def state_message(message: Message) -> None:
         broadcast_state["draft"] = {"text_html": clean, "photo_file_id": photo_file_id, "buttons": []}
         broadcast_state["stage"] = "buttons"
         await broadcast_drafts.save(telegram_id, broadcast_state)
-        await message.answer("Добавьте кнопки: каждая строка в формате\n<code>Текст кнопки | https://site.ru</code>\n\nДо 6 кнопок. Если кнопки не нужны — /skip.")
+        await message.answer(
+            "Добавьте кнопки: каждая строка в формате\n<code>Текст кнопки | https://site.ru</code>\n\nДо 6 кнопок.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⏭ Без кнопок", callback_data="adm:broadcast:skip")],
+                [InlineKeyboardButton(text="Отмена", callback_data="adm:broadcast")],
+            ]),
+        )
         return
 
     if telegram_id not in support_waiting:

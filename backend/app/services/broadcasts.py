@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from html import escape
 
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
@@ -15,6 +16,56 @@ from app.models import AdminUser, BroadcastCampaign, BroadcastDelivery, Device, 
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _duration_text(started_at: datetime | None, finished_at: datetime | None) -> str:
+    if not started_at or not finished_at:
+        return "—"
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    if finished_at.tzinfo is None:
+        finished_at = finished_at.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((finished_at - started_at).total_seconds()))
+    minutes, seconds = divmod(seconds, 60)
+    return f"{minutes} мин {seconds} сек" if minutes else f"{seconds} сек"
+
+
+def format_broadcast_report(summary: dict, *, completed: bool = True) -> str:
+    lines = [
+        "✅ <b>Рассылка завершена</b>" if completed else "⏹ <b>Рассылка отменена</b>",
+        f"Кампания: <code>{summary['campaign_id']}</code>",
+        f"Сегмент: <b>{escape(summary['segment'])}</b>",
+        f"Всего: <b>{summary['total_count']}</b>",
+        f"Доставлено: <b>{summary['sent_count']}</b>",
+        f"Не доставлено: <b>{summary['failed_count']}</b>",
+        f"Бот недоступен: <b>{summary['skipped_count']}</b>",
+        f"Длительность: <b>{summary['duration']}</b>",
+    ]
+    if summary["errors"]:
+        lines.append("Причины ошибок:")
+        lines.extend(f"• {escape(reason)} — {count}" for reason, count in summary["errors"])
+    return "\n".join(lines)
+
+
+def _campaign_summary(db, campaign: BroadcastCampaign, author_telegram_id: int | None) -> dict:
+    errors = db.execute(
+        select(BroadcastDelivery.error, func.count())
+        .where(BroadcastDelivery.campaign_id == campaign.id, BroadcastDelivery.status == "failed")
+        .group_by(BroadcastDelivery.error)
+        .order_by(func.count().desc())
+        .limit(5)
+    ).all()
+    return {
+        "campaign_id": str(campaign.id)[:8],
+        "segment": campaign.segment,
+        "total_count": campaign.total_count,
+        "sent_count": campaign.sent_count,
+        "failed_count": campaign.failed_count,
+        "skipped_count": campaign.skipped_count,
+        "duration": _duration_text(campaign.started_at, campaign.finished_at),
+        "errors": [(reason or "Неизвестная ошибка", count) for reason, count in errors],
+        "author_telegram_id": author_telegram_id,
+    }
 
 
 def _recipient_query(segment: str):
@@ -70,7 +121,14 @@ async def _process_campaign(campaign_id) -> None:
                 if campaign.cancel_requested:
                     campaign.status = "cancelled"
                     campaign.finished_at = datetime.now(timezone.utc)
+                    author = db.get(AdminUser, campaign.author_admin_id) if campaign.author_admin_id else None
+                    summary = _campaign_summary(db, campaign, author.telegram_id if author else None)
                     db.commit()
+                    if summary["author_telegram_id"]:
+                        try:
+                            await bot.send_message(summary["author_telegram_id"], format_broadcast_report(summary, completed=False))
+                        except Exception:
+                            logger.exception("Unable to send broadcast cancellation notification")
                     break
                 row = db.execute(
                     select(BroadcastDelivery, TelegramUser)
@@ -91,14 +149,15 @@ async def _process_campaign(campaign_id) -> None:
                     campaign.status = "completed"
                     campaign.finished_at = datetime.now(timezone.utc)
                     author = db.get(AdminUser, campaign.author_admin_id) if campaign.author_admin_id else None
-                    summary = (campaign.sent_count, campaign.failed_count, campaign.skipped_count, campaign.total_count,
-                               author.telegram_id if author else None)
+                    summary = _campaign_summary(db, campaign, author.telegram_id if author else None)
                     db.commit()
-                    if summary[4]:
+                    if summary["author_telegram_id"]:
                         try:
-                            await bot.send_message(summary[4], f"✅ Рассылка завершена\nДоставлено: {summary[0]}\nОшибок: {summary[1]}\nПропущено: {summary[2]}\nВсего: {summary[3]}")
+                            await bot.send_message(summary["author_telegram_id"], format_broadcast_report(summary))
                         except Exception:
                             logger.exception("Unable to send broadcast completion notification")
+                    logger.info("Broadcast campaign=%s completed sent=%s failed=%s skipped=%s", campaign.id,
+                                campaign.sent_count, campaign.failed_count, campaign.skipped_count)
                     return
                 delivery, user = row
                 delivery.attempts += 1
