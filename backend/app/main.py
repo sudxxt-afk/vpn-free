@@ -15,7 +15,7 @@ from app.config import get_settings
 from app.crypto import decrypt
 from app.database import Base, SessionLocal, engine, get_db
 from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, BroadcastDelivery, Device, Donation, MetricSnapshot,
-                        Node, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceRun, SupportMessage, SupportTicket, TelegramUser)
+                        Node, NodeProbeState, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceRun, SupportMessage, SupportTicket, TelegramUser)
 from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLookup, BotUserRequest, BroadcastCreate, ChannelCreate, ChannelResponse, DashboardResponse,
                          DeviceCreate, DeviceResponse, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
                          AnalyticsCohortResponse, AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
@@ -149,7 +149,7 @@ def device_response(device: Device, include_url: bool = False, plain_token: str 
     return DeviceResponse(id=device.id, slot=device.slot, label=device.label, token_hint=device.token_hint, is_revoked=device.is_revoked, subscription_url=url)
 
 
-def node_response(node: Node, source: Source | None = None) -> NodeResponse:
+def node_response(node: Node, source: Source | None = None, probe: NodeProbeState | None = None) -> NodeResponse:
     raw_config = decrypt(node.config_ciphertext)
     parsed = parse_config(raw_config)
     if source:
@@ -166,7 +166,39 @@ def node_response(node: Node, source: Source | None = None) -> NodeResponse:
         source_id=node.source_id, region=region, region_emoji=region_emoji, network_profile=profile,
         network_label="Мобильный интернет" if mobile else "Wi‑Fi",
         network_emoji="📡" if mobile else "📶", profile_priority=profile_priority,
+        probe_stage=probe.stage if probe else None,
+        probe_throughput_kbps=probe.throughput_kbps if probe else None,
+        probe_error=probe.last_error if probe else None,
+        probe_checked_at=probe.last_checked_at if probe else None,
     )
+
+
+def _verified_pool_conditions() -> tuple:
+    fresh_after = datetime.now(timezone.utc) - timedelta(minutes=settings.health_probe_fresh_minutes)
+    return (
+        Source.is_enabled.is_(True),
+        Node.state == NodeState.ACTIVE,
+        NodeProbeState.stage == "passed",
+        NodeProbeState.static_valid.is_(True),
+        NodeProbeState.xray_started.is_(True),
+        NodeProbeState.last_success_at >= fresh_after,
+    )
+
+
+def verified_pool_summary(db: Session) -> tuple[int, float | None]:
+    active = db.scalar(
+        select(func.count()).select_from(Node)
+        .join(Source, Source.id == Node.source_id)
+        .join(NodeProbeState, NodeProbeState.node_id == Node.id)
+        .where(*_verified_pool_conditions())
+    ) or 0
+    ping = db.scalar(
+        select(func.avg(Node.avg_latency_ms)).select_from(Node)
+        .join(Source, Source.id == Node.source_id)
+        .join(NodeProbeState, NodeProbeState.node_id == Node.id)
+        .where(*_verified_pool_conditions())
+    )
+    return active, ping
 
 
 def source_network_hint(source: Source) -> str | None:
@@ -236,9 +268,8 @@ def auth_me(request: Request, db: Session = Depends(get_db)) -> AdminResponse:
 @app.get("/admin/dashboard", response_model=DashboardResponse)
 def dashboard(request: Request, db: Session = Depends(get_db)) -> DashboardResponse:
     require_admin(request)
-    active = db.scalar(select(func.count()).select_from(Node).where(Node.state == NodeState.ACTIVE)) or 0
+    active, ping = verified_pool_summary(db)
     quarantined = db.scalar(select(func.count()).select_from(Node).where(Node.state == NodeState.QUARANTINED)) or 0
-    ping = db.scalar(select(func.avg(Node.avg_latency_ms)).where(Node.state == NodeState.ACTIVE))
     users = db.scalar(select(func.count()).select_from(TelegramUser).where(TelegramUser.is_blocked.is_(False))) or 0
     errors = db.scalar(select(func.count()).select_from(Source).where(Source.last_error.is_not(None))) or 0
     channels = db.scalar(select(func.count()).select_from(RequiredChannel).where(RequiredChannel.is_active.is_(True))) or 0
@@ -465,8 +496,13 @@ def source_runs(source_id: UUID, request: Request, db: Session = Depends(get_db)
 @app.get("/admin/nodes", response_model=list[NodeResponse])
 def list_nodes(request: Request, db: Session = Depends(get_db), limit: int = 100) -> list[NodeResponse]:
     require_admin(request)
-    rows = db.execute(select(Node, Source).join(Source, Source.id == Node.source_id).order_by(Node.score.desc()).limit(min(limit, 500))).all()
-    response = [node_response(node, source) for node, source in rows]
+    rows = db.execute(
+        select(Node, Source, NodeProbeState)
+        .join(Source, Source.id == Node.source_id)
+        .outerjoin(NodeProbeState, NodeProbeState.node_id == Node.id)
+        .order_by(Node.score.desc()).limit(min(limit, 500))
+    ).all()
+    response = [node_response(node, source, probe) for node, source, probe in rows]
     return sorted(response, key=lambda item: (item.profile_priority, item.score), reverse=True)
 
 
@@ -696,8 +732,7 @@ def bot_channels(db: Session = Depends(get_db)) -> list[dict]:
 
 @app.get("/internal/status", dependencies=[Depends(require_internal)])
 def bot_status(db: Session = Depends(get_db)) -> dict:
-    active = db.scalar(select(func.count()).select_from(Node).where(Node.state == NodeState.ACTIVE)) or 0
-    ping = db.scalar(select(func.avg(Node.avg_latency_ms)).where(Node.state == NodeState.ACTIVE))
+    active, ping = verified_pool_summary(db)
     return {"active_nodes": active, "average_ping": round(ping, 1) if ping else None}
 
 
@@ -749,11 +784,12 @@ def campaign_payload(item: BroadcastCampaign) -> dict:
 @app.get("/internal/admin/{telegram_id}/dashboard", dependencies=[Depends(require_internal)])
 def bot_admin_dashboard(telegram_id: int, db: Session = Depends(get_db)) -> dict:
     admin = require_bot_admin(db, telegram_id)
+    active, ping = verified_pool_summary(db)
     return {
         "login": admin.login, "role": admin.role.value, "support_enabled": admin.support_enabled,
-        "active_nodes": db.scalar(select(func.count()).select_from(Node).where(Node.state == NodeState.ACTIVE)) or 0,
+        "active_nodes": active,
         "problem_nodes": db.scalar(select(func.count()).select_from(Node).where(Node.state.in_([NodeState.DEGRADED, NodeState.QUARANTINED]))) or 0,
-        "average_ping": db.scalar(select(func.avg(Node.avg_latency_ms)).where(Node.state == NodeState.ACTIVE)),
+        "average_ping": ping,
         "source_errors": db.scalar(select(func.count()).select_from(Source).where(Source.last_error.is_not(None))) or 0,
         "new_tickets": db.scalar(select(func.count()).select_from(SupportTicket).where(SupportTicket.status == "new")) or 0,
         "active_broadcasts": db.scalar(select(func.count()).select_from(BroadcastCampaign).where(BroadcastCampaign.status.in_(["queued", "processing"]))) or 0,
@@ -978,19 +1014,28 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
     rows = db.execute(
         select(Node, Source)
         .join(Source, Source.id == Node.source_id)
-        .where(Node.state == NodeState.ACTIVE)
+        .join(NodeProbeState, NodeProbeState.node_id == Node.id)
+        .where(*_verified_pool_conditions())
         .order_by(Node.score.desc())
     ).all()
     selected: list[tuple[Node, Source, str]] = []
     counts: dict[str, int] = {}
+    source_counts: dict[UUID, int] = {}
+    host_counts: dict[str, int] = {}
     best_by_profile: dict[str, tuple[Node, Source]] = {}
     for node, source in rows:
         profile, _ = node_profile(node, source)
-        best_by_profile.setdefault(profile, (node, source))
         key = transport_key(decrypt(node.config_ciphertext), node.protocol)
         if counts.get(key, 0) >= getattr(policy, f"{key}_limit"):
             continue
+        if source_counts.get(source.id, 0) >= settings.subscription_max_per_source:
+            continue
+        if host_counts.get(node.host, 0) >= settings.subscription_max_per_host:
+            continue
         counts[key] = counts.get(key, 0) + 1
+        source_counts[source.id] = source_counts.get(source.id, 0) + 1
+        host_counts[node.host] = host_counts.get(node.host, 0) + 1
+        best_by_profile.setdefault(profile, (node, source))
         selected.append((node, source, profile))
 
     # Keep the two dedicated auto routes first, then favour LTE-labelled nodes

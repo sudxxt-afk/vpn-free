@@ -21,6 +21,17 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     source_refresh_minutes: int = 40
     health_check_minutes: int = 10
+    health_probe_batch_size: int = 60
+    health_probe_concurrency: int = 2
+    health_probe_timeout_seconds: float = 8.0
+    health_probe_fresh_minutes: int = 45
+    health_probe_urls: str = "https://cp.cloudflare.com/generate_204,https://www.gstatic.com/generate_204,https://connectivitycheck.platform.hicloud.com/generate_204"
+    health_probe_required_successes: int = 2
+    health_probe_speed_url: str = "https://speed.cloudflare.com/__down?bytes=131072"
+    health_probe_min_speed_kbps: float = 128.0
+    xray_binary: str = "/usr/local/bin/xray"
+    subscription_max_per_source: int = 12
+    subscription_max_per_host: int = 1
     membership_check_hours: int = 12
     subgram_api_key: str = ""
     subgram_base_url: str = "https://api.subgram.org"
@@ -39,6 +50,10 @@ class Settings(BaseSettings):
     @property
     def admin_ids(self) -> set[int]:
         return {int(value.strip()) for value in self.admin_telegram_ids.split(",") if value.strip().isdigit()}
+
+    @property
+    def probe_urls(self) -> tuple[str, ...]:
+        return tuple(value.strip() for value in self.health_probe_urls.split(",") if value.strip())
 
 
 @lru_cache

@@ -124,6 +124,22 @@ class Node(Base):
     removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class NodeProbeState(Base):
+    """Latest end-to-end Xray result. A node is never published without it."""
+    __tablename__ = "node_probe_states"
+    node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"), primary_key=True)
+    stage: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    static_valid: Mapped[bool] = mapped_column(Boolean, default=False)
+    xray_started: Mapped[bool] = mapped_column(Boolean, default=False)
+    http_successes: Mapped[int] = mapped_column(Integer, default=0)
+    http_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    throughput_kbps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
 class RequiredChannel(Base):
     __tablename__ = "required_channels"
     id: Mapped[uuid.UUID] = uuid_column()

@@ -86,6 +86,10 @@ class NodeResponse(BaseModel):
     network_label: str
     network_emoji: str
     profile_priority: int
+    probe_stage: str | None = None
+    probe_throughput_kbps: float | None = None
+    probe_error: str | None = None
+    probe_checked_at: datetime | None = None
 
 
 class PoolPolicyPayload(BaseModel):

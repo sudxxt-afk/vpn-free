@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
-from app.models import MetricSnapshot, Node, NodeState, Source
+from app.models import MetricSnapshot, Node, NodeProbeState, NodeState, Source
 from app.models import TelegramUser
 from app.services.alerts import notify_admins, should_alert
 from app.services.github import refresh_source
@@ -40,9 +40,30 @@ def refresh_all_sources() -> None:
 def health_check() -> None:
     with SessionLocal() as db:
         ok, total = check_active_nodes(db)
-        active = db.scalar(select(func.count()).select_from(Node).where(Node.state == NodeState.ACTIVE)) or 0
-        quarantined = db.scalar(select(func.count()).select_from(Node).where(Node.state == NodeState.QUARANTINED)) or 0
-        average_ping = db.scalar(select(func.avg(Node.avg_latency_ms)).where(Node.state == NodeState.ACTIVE))
+        fresh_after = datetime.now(timezone.utc) - timedelta(minutes=settings.health_probe_fresh_minutes)
+        verified = (
+            Node.state == NodeState.ACTIVE,
+            NodeProbeState.stage == "passed",
+            NodeProbeState.last_success_at >= fresh_after,
+            Source.is_enabled.is_(True),
+        )
+        active = db.scalar(
+            select(func.count()).select_from(Node)
+            .join(Source, Source.id == Node.source_id)
+            .join(NodeProbeState, NodeProbeState.node_id == Node.id)
+            .where(*verified)
+        ) or 0
+        quarantined = db.scalar(
+            select(func.count()).select_from(Node)
+            .join(Source, Source.id == Node.source_id)
+            .where(Source.is_enabled.is_(True), Node.state == NodeState.QUARANTINED)
+        ) or 0
+        average_ping = db.scalar(
+            select(func.avg(Node.avg_latency_ms)).select_from(Node)
+            .join(Source, Source.id == Node.source_id)
+            .join(NodeProbeState, NodeProbeState.node_id == Node.id)
+            .where(*verified)
+        )
         previous = db.scalars(select(MetricSnapshot).order_by(MetricSnapshot.created_at.desc()).limit(1)).first()
         db.add(MetricSnapshot(active_nodes=active, quarantined_nodes=quarantined,
                               average_ping_ms=round(average_ping, 1) if average_ping else None,
