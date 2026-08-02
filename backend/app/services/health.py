@@ -142,8 +142,14 @@ def _selected_nodes(db: Session, priority_node_ids: list[UUID] | None = None) ->
         select(Node.id, Node.config_ciphertext)
         .join(Source, Source.id == Node.source_id)
         .outerjoin(NodeProbeState, NodeProbeState.node_id == Node.id)
+        .outerjoin(SourceQuality, SourceQuality.source_id == Node.source_id)
         .where(Source.is_enabled.is_(True), Node.state == NodeState.ACTIVE)
-        .order_by(active_priority, NodeProbeState.last_checked_at.asc(), Node.score.desc())
+        .order_by(
+            active_priority,
+            NodeProbeState.last_checked_at.asc(),
+            SourceQuality.pass_rate.desc().nullslast(),
+            Node.score.desc(),
+        )
         .limit(active_limit)
     )
     if selected_ids:
@@ -154,12 +160,14 @@ def _selected_nodes(db: Session, priority_node_ids: list[UUID] | None = None) ->
         select(Node.id, Node.config_ciphertext)
         .join(Source, Source.id == Node.source_id)
         .outerjoin(NodeProbeState, NodeProbeState.node_id == Node.id)
+        .outerjoin(SourceQuality, SourceQuality.source_id == Node.source_id)
         .where(Source.is_enabled.is_(True), Node.state.in_([
             NodeState.CANDIDATE, NodeState.DEGRADED, NodeState.QUARANTINED,
         ]))
         .order_by(
             case((NodeProbeState.node_id.is_(None), 0), else_=1),
             case((Node.state == NodeState.CANDIDATE, 0), else_=1),
+            SourceQuality.pass_rate.desc().nullslast(),
             Node.first_seen_at.desc(),
             NodeProbeState.last_checked_at.asc(),
             Node.score.desc(),

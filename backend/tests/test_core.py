@@ -144,6 +144,27 @@ class XrayProbeTests(unittest.TestCase):
             self.assertNotIn(ignored.id, [node_id for node_id, _ in selected])
         engine.dispose()
 
+    def test_unchecked_backlog_prefers_the_more_reliable_source(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            reliable = Source(name="reliable", github_url="https://github.com/a/reliable", raw_url="https://raw.githubusercontent.com/a/reliable/main/list")
+            noisy = Source(name="noisy", github_url="https://github.com/a/noisy", raw_url="https://raw.githubusercontent.com/a/noisy/main/list")
+            db.add_all([reliable, noisy]); db.flush()
+            db.add_all([
+                SourceQuality(source_id=reliable.id, checked_nodes=100, passed_nodes=70, pass_rate=0.7),
+                SourceQuality(source_id=noisy.id, checked_nodes=100, passed_nodes=10, pass_rate=0.1),
+            ])
+            reliable_node = Node(source_id=reliable.id, fingerprint="a" * 64, protocol="vless", host="8.8.8.8", port=443,
+                                 config_ciphertext="reliable", state=NodeState.CANDIDATE)
+            noisy_node = Node(source_id=noisy.id, fingerprint="b" * 64, protocol="vless", host="8.8.4.4", port=443,
+                              config_ciphertext="noisy", state=NodeState.CANDIDATE)
+            db.add_all([noisy_node, reliable_node]); db.commit()
+            selected = _selected_nodes(db)
+            self.assertEqual(selected[0][0], reliable_node.id)
+        engine.dispose()
+
     def test_reality_requires_public_key_and_builds_strict_stream(self):
         invalid = "vless://d5e9a2ee-1111-4444-9999-aaaaaaaaaaaa@8.8.8.8:443?security=reality&type=tcp&sni=example.com&fp=chrome"
         with self.assertRaisesRegex(ProbeConfigError, "requires pbk"):
