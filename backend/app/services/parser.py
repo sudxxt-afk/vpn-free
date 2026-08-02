@@ -29,6 +29,16 @@ def _is_public_host(host: str) -> bool:
         return "." in host and len(host) <= 253
 
 
+def address_diversity_key(host: str) -> str | None:
+    """Group literal IPv4 endpoints by /24 and IPv6 endpoints by /64."""
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return None
+    prefix = 24 if address.version == 4 else 64
+    return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
+
+
 def _parse_vmess(value: str) -> tuple[str, int] | None:
     payload = value.split("://", 1)[1].split("#", 1)[0]
     payload += "=" * (-len(payload) % 4)

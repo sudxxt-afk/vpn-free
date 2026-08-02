@@ -67,6 +67,12 @@ class SourceResponse(BaseModel):
     last_success_at: datetime | None
     last_error: str | None
     content_hash: str | None
+    quality_rating: float = 0
+    checked_nodes: int = 0
+    passed_nodes: int = 0
+    rejected_nodes: int = 0
+    new_nodes_last_run: int = 0
+    rejection_reasons: dict[str, int] = Field(default_factory=dict)
 
 
 class NodeResponse(BaseModel):

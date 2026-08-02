@@ -1,17 +1,19 @@
 import base64
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Node, NodeProbeState, NodeState, Source
-from app.services.health import _selected_nodes, apply_probe_result
+from app.models import Node, NodeProbeState, NodeState, Source, SourceQuality
+from app.services.health import _selected_nodes, apply_probe_result, normalize_node_states, refresh_source_qualities
 from app.services.github import SourceError, normalize_github_url
-from app.services.parser import parse_config, parse_payload, transport_key, with_display_name
+from app.services.parser import address_diversity_key, parse_config, parse_payload, transport_key, with_display_name
 from app.services.xray_probe import ProbeConfigError, ProbeResult, build_xray_config
+from app.services.scoring import calculate_score
 
 
 class ParserTests(unittest.TestCase):
@@ -31,6 +33,11 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(parse_config("vless://id@127.0.0.1:443"))
         self.assertIsNone(parse_config("wireguard://key@1.1.1.1:443"))
         self.assertEqual(parse_payload("vless://id@127.0.0.1:443\ninvalid"), [])
+
+    def test_groups_literal_addresses_for_pool_diversity(self):
+        self.assertEqual(address_diversity_key("8.8.8.8"), "8.8.8.0/24")
+        self.assertEqual(address_diversity_key("8.8.8.200"), "8.8.8.0/24")
+        self.assertIsNone(address_diversity_key("vpn.example.com"))
 
     def test_keeps_source_config_and_rewrites_only_client_label(self):
         config = "vless://d5e9a2ee-1111-4444-9999-aaaaaaaaaaaa@8.8.8.8:443?security=reality&type=tcp#old"
@@ -60,6 +67,63 @@ class GitHubUrlTests(unittest.TestCase):
 
 
 class XrayProbeTests(unittest.TestCase):
+    def test_fast_nodes_and_reliable_sources_score_higher(self):
+        fast = Node(success_checks=6, failed_checks=0, consecutive_failures=0, avg_latency_ms=220)
+        slow = Node(success_checks=6, failed_checks=0, consecutive_failures=0, avg_latency_ms=1100)
+        self.assertGreater(calculate_score(fast, 3000, 0.7), calculate_score(slow, 500, 0.1))
+        self.assertGreater(calculate_score(fast, 3000, 0.7), calculate_score(fast, 3000, 0.1))
+
+    def test_legacy_and_stale_active_nodes_are_demoted(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            source = Source(name="source", github_url="https://github.com/a/states", raw_url="https://raw.githubusercontent.com/a/states/main/list")
+            db.add(source); db.flush()
+            legacy = Node(source_id=source.id, fingerprint="5" * 64, protocol="vless", host="8.8.8.8", port=443,
+                          config_ciphertext="legacy", state=NodeState.ACTIVE, success_checks=100)
+            stale = Node(source_id=source.id, fingerprint="6" * 64, protocol="vless", host="8.8.4.4", port=443,
+                         config_ciphertext="stale", state=NodeState.ACTIVE)
+            fresh = Node(source_id=source.id, fingerprint="7" * 64, protocol="vless", host="1.1.1.1", port=443,
+                         config_ciphertext="fresh", state=NodeState.ACTIVE)
+            db.add_all([legacy, stale, fresh]); db.flush()
+            db.add_all([
+                NodeProbeState(node_id=stale.id, stage="passed", static_valid=True, xray_started=True,
+                               last_success_at=datetime.now(timezone.utc) - timedelta(hours=2)),
+                NodeProbeState(node_id=fresh.id, stage="passed", static_valid=True, xray_started=True,
+                               last_success_at=datetime.now(timezone.utc)),
+            ])
+            db.commit()
+            normalize_node_states(db)
+            self.assertEqual((legacy.state, legacy.success_checks), (NodeState.CANDIDATE, 0))
+            self.assertEqual(stale.state, NodeState.DEGRADED)
+            self.assertEqual(fresh.state, NodeState.ACTIVE)
+        engine.dispose()
+
+    def test_source_quality_records_rating_and_rejection_reasons(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            source = Source(name="quality", github_url="https://github.com/a/quality", raw_url="https://raw.githubusercontent.com/a/quality/main/list")
+            db.add(source); db.flush()
+            passed = Node(source_id=source.id, fingerprint="8" * 64, protocol="vless", host="8.8.8.8", port=443,
+                          config_ciphertext="passed", state=NodeState.ACTIVE, success_checks=2, avg_latency_ms=200)
+            failed = Node(source_id=source.id, fingerprint="9" * 64, protocol="vless", host="8.8.4.4", port=443,
+                          config_ciphertext="failed", state=NodeState.QUARANTINED, failed_checks=1)
+            db.add_all([passed, failed]); db.flush()
+            db.add_all([
+                NodeProbeState(node_id=passed.id, stage="passed", static_valid=True, xray_started=True, throughput_kbps=2500),
+                NodeProbeState(node_id=failed.id, stage="http", static_valid=True, xray_started=True, last_error="timeout"),
+            ])
+            db.commit()
+            refresh_source_qualities(db, {source.id})
+            quality = db.get(SourceQuality, source.id)
+            self.assertEqual((quality.checked_nodes, quality.passed_nodes, quality.rejected_nodes), (2, 1, 1))
+            self.assertEqual(quality.pass_rate, 0.5)
+            self.assertIn("Нет доступа", quality.rejection_reasons_json)
+        engine.dispose()
+
     def test_fresh_source_nodes_are_selected_before_the_regular_pool(self):
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)

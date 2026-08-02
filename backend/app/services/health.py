@@ -1,21 +1,98 @@
 import logging
 import threading
+import json
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import case, select
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.crypto import decrypt
-from app.models import Node, NodeProbeState, NodeState, Source
-from app.services.scoring import refresh_state
+from app.models import Node, NodeProbeState, NodeState, Source, SourceQuality
+from app.services.scoring import calculate_score, refresh_state
 from app.services.xray_probe import ProbeResult, probe_config
 
 settings = get_settings()
 _probe_cycle_lock = threading.Lock()
+
+REJECTION_LABELS = {
+    "static": "Некорректная конфигурация",
+    "xray": "Xray не запустился",
+    "http": "Нет доступа к тестовым сайтам",
+    "throughput": "Не прошла проверка скорости",
+    "internal": "Внутренняя ошибка проверки",
+}
+
+
+def normalize_node_states(db: Session) -> tuple[int, int]:
+    """Make ACTIVE mean a recent complete Xray pass, never a legacy TCP check."""
+    fresh_after = datetime.now(timezone.utc) - timedelta(minutes=settings.health_probe_fresh_minutes)
+    legacy_ids = (
+        select(Node.id)
+        .outerjoin(NodeProbeState, NodeProbeState.node_id == Node.id)
+        .where(Node.state == NodeState.ACTIVE, NodeProbeState.node_id.is_(None))
+    )
+    legacy = db.execute(
+        update(Node).where(Node.id.in_(legacy_ids)).values(
+            state=NodeState.CANDIDATE,
+            score=0,
+            success_checks=0,
+            failed_checks=0,
+            consecutive_failures=0,
+            avg_latency_ms=None,
+            last_checked_at=None,
+        )
+    ).rowcount or 0
+    stale_ids = (
+        select(Node.id)
+        .join(Source, Source.id == Node.source_id)
+        .join(NodeProbeState, NodeProbeState.node_id == Node.id)
+        .where(
+            Node.state == NodeState.ACTIVE,
+            or_(
+                Source.is_enabled.is_(False),
+                NodeProbeState.stage != "passed",
+                NodeProbeState.last_success_at.is_(None),
+                NodeProbeState.last_success_at < fresh_after,
+            ),
+        )
+    )
+    stale = db.execute(update(Node).where(Node.id.in_(stale_ids)).values(state=NodeState.DEGRADED)).rowcount or 0
+    if legacy or stale:
+        db.commit()
+        logging.info("normalized node states legacy=%s stale=%s", legacy, stale)
+    return legacy, stale
+
+
+def refresh_source_qualities(db: Session, source_ids: set[UUID]) -> None:
+    for source_id in source_ids:
+        rows = db.execute(
+            select(Node, NodeProbeState)
+            .join(NodeProbeState, NodeProbeState.node_id == Node.id)
+            .where(Node.source_id == source_id, Node.state != NodeState.REMOVED)
+        ).all()
+        checked = len(rows)
+        passed = sum(1 for _node, probe in rows if probe.stage == "passed")
+        pass_rate = passed / checked if checked else 0.0
+        reasons = Counter(
+            REJECTION_LABELS.get(probe.stage, probe.stage)
+            for _node, probe in rows if probe.stage != "passed"
+        )
+        quality = db.get(SourceQuality, source_id)
+        if quality is None:
+            quality = SourceQuality(source_id=source_id)
+            db.add(quality)
+        quality.checked_nodes = checked
+        quality.passed_nodes = passed
+        quality.rejected_nodes = checked - passed
+        quality.pass_rate = round(pass_rate, 4)
+        quality.rejection_reasons_json = json.dumps(dict(reasons.most_common(5)), ensure_ascii=False)
+        for node, probe in rows:
+            node.score = calculate_score(node, probe.throughput_kbps, pass_rate)
+    db.commit()
 
 
 def _probe(raw: str) -> ProbeResult:
@@ -117,6 +194,8 @@ def apply_probe_result(db: Session, node: Node, result: ProbeResult) -> None:
     state.last_error = result.error
     state.last_checked_at = now
     node.last_checked_at = now
+    quality = db.get(SourceQuality, node.source_id)
+    source_pass_rate = quality.pass_rate if quality and quality.checked_nodes else 0.5
     if result.success:
         successful_steps = max(result.http_successes, settings.health_probe_required_successes)
         node.success_checks += successful_steps
@@ -126,22 +205,24 @@ def apply_probe_result(db: Session, node: Node, result: ProbeResult) -> None:
             else round(node.avg_latency_ms * 0.7 + (result.latency_ms or node.avg_latency_ms) * 0.3, 2)
         )
         state.last_success_at = now
-        refresh_state(node)
+        refresh_state(node, result.throughput_kbps, source_pass_rate)
     else:
         node.failed_checks += max(1, result.http_attempts - result.http_successes)
         node.consecutive_failures += 1
-        refresh_state(node)
+        refresh_state(node, result.throughput_kbps, source_pass_rate)
         # Every hard gate is mandatory: partial connectivity is not publishable.
         node.state = NodeState.QUARANTINED
 
 
 def check_active_nodes(db: Session, priority_node_ids: list[UUID] | None = None) -> tuple[int, int]:
     with _probe_cycle_lock:
+        normalize_node_states(db)
         selected = _selected_nodes(db, priority_node_ids)
         if not selected:
             return 0, 0
         ok = 0
         stages: Counter[str] = Counter()
+        affected_sources: set[UUID] = set()
         with ThreadPoolExecutor(max_workers=max(1, settings.health_probe_concurrency)) as executor:
             futures = {executor.submit(_probe, ciphertext): node_id for node_id, ciphertext in selected}
             for future in as_completed(futures):
@@ -152,8 +233,10 @@ def check_active_nodes(db: Session, priority_node_ids: list[UUID] | None = None)
                     continue
                 apply_probe_result(db, node, result)
                 db.commit()
+                affected_sources.add(node.source_id)
                 ok += int(result.success)
                 stages[result.stage] += 1
+        refresh_source_qualities(db, affected_sources)
         logging.info(
             "xray probe batch passed=%s total=%s priority=%s stages=%s",
             ok, len(selected), len({node_id for node_id, _ in selected} & set(priority_node_ids or [])), dict(stages),

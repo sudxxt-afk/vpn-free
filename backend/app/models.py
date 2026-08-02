@@ -90,6 +90,18 @@ class Source(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class SourceQuality(Base):
+    __tablename__ = "source_qualities"
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True)
+    checked_nodes: Mapped[int] = mapped_column(Integer, default=0)
+    passed_nodes: Mapped[int] = mapped_column(Integer, default=0)
+    rejected_nodes: Mapped[int] = mapped_column(Integer, default=0)
+    pass_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    new_nodes_last_run: Mapped[int] = mapped_column(Integer, default=0)
+    rejection_reasons_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class SourceRun(Base):
     __tablename__ = "source_runs"
     id: Mapped[uuid.UUID] = uuid_column()

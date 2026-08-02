@@ -25,6 +25,26 @@ services:
       retries: 10
     restart: unless-stopped
 
+  backup:
+    build: ./backup
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY}
+      BACKUP_INTERVAL_SECONDS: 86400
+    depends_on:
+      - postgres
+    volumes:
+      - postgres_backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "find /backups/daily -name '*.dump.enc' -mtime -2 -type f | grep -q ."]
+      interval: 1h
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
   api:
     build: ./backend
     env_file: .env
@@ -66,3 +86,4 @@ services:
 
 volumes:
   postgres_data:
+  postgres_backups:

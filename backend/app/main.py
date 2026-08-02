@@ -15,7 +15,7 @@ from app.config import get_settings
 from app.crypto import decrypt
 from app.database import Base, SessionLocal, engine, get_db
 from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, BroadcastDelivery, Device, Donation, MetricSnapshot,
-                        Node, NodeProbeState, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceRun, SupportMessage, SupportTicket, TelegramUser)
+                        Node, NodeProbeState, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceQuality, SourceRun, SupportMessage, SupportTicket, TelegramUser)
 from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLookup, BotUserRequest, BroadcastCreate, ChannelCreate, ChannelResponse, DashboardResponse,
                          DeviceCreate, DeviceResponse, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
                          AnalyticsCohortResponse, AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
@@ -23,7 +23,7 @@ from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLooku
                          StarDonationIntent, StarDonationPreCheckout, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_github_url, refresh_source
-from app.services.parser import classify_network_profile, display_region, parse_config, transport_key, with_display_name
+from app.services.parser import address_diversity_key, classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.telegram import has_required_memberships, validate_bot_admin
 from app.services.subgram import get_partner_access
 from app.services.rate_limit import is_allowed
@@ -137,10 +137,20 @@ def bot_user(db: Session, telegram_id: int) -> TelegramUser:
     return user
 
 
-def source_response(source: Source) -> SourceResponse:
+def source_response(source: Source, quality: SourceQuality | None = None) -> SourceResponse:
+    try:
+        rejection_reasons = json.loads(quality.rejection_reasons_json) if quality else {}
+    except json.JSONDecodeError:
+        rejection_reasons = {}
     return SourceResponse(
         id=source.id, name=source.name, github_url=source.github_url, is_enabled=source.is_enabled,
         last_success_at=source.last_success_at, last_error=source.last_error, content_hash=source.content_hash,
+        quality_rating=round((quality.pass_rate if quality else 0) * 100, 1),
+        checked_nodes=quality.checked_nodes if quality else 0,
+        passed_nodes=quality.passed_nodes if quality else 0,
+        rejected_nodes=quality.rejected_nodes if quality else 0,
+        new_nodes_last_run=quality.new_nodes_last_run if quality else 0,
+        rejection_reasons=rejection_reasons,
     )
 
 
@@ -442,7 +452,12 @@ def toggle_user_block(user_id: UUID, request: Request, db: Session = Depends(get
 @app.get("/admin/sources", response_model=list[SourceResponse])
 def list_sources(request: Request, db: Session = Depends(get_db)) -> list[SourceResponse]:
     require_admin(request)
-    return [source_response(item) for item in db.scalars(select(Source).order_by(Source.created_at.desc())).all()]
+    rows = db.execute(
+        select(Source, SourceQuality)
+        .outerjoin(SourceQuality, SourceQuality.source_id == Source.id)
+        .order_by(Source.created_at.desc())
+    ).all()
+    return [source_response(source, quality) for source, quality in rows]
 
 
 @app.post("/admin/sources", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
@@ -459,7 +474,7 @@ def create_source(payload: SourceCreate, request: Request, db: Session = Depends
     audit(db, "source.create", current["sub"], payload.github_url)
     db.commit()
     db.refresh(source)
-    return source_response(source)
+    return source_response(source, db.get(SourceQuality, source.id))
 
 
 @app.post("/admin/sources/{source_id}/refresh")
@@ -483,7 +498,7 @@ def toggle_source(source_id: UUID, request: Request, db: Session = Depends(get_d
     source.is_enabled = not source.is_enabled
     audit(db, "source.toggle", current["sub"], f"{source_id}:{source.is_enabled}")
     db.commit()
-    return source_response(source)
+    return source_response(source, db.get(SourceQuality, source.id))
 
 
 @app.get("/admin/sources/{source_id}/runs")
@@ -1022,6 +1037,7 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
     counts: dict[str, int] = {}
     source_counts: dict[UUID, int] = {}
     host_counts: dict[str, int] = {}
+    address_groups: set[str] = set()
     best_by_profile: dict[str, tuple[Node, Source]] = {}
     for node, source in rows:
         profile, _ = node_profile(node, source)
@@ -1032,9 +1048,14 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
             continue
         if host_counts.get(node.host, 0) >= settings.subscription_max_per_host:
             continue
+        address_group = address_diversity_key(node.host)
+        if address_group and address_group in address_groups:
+            continue
         counts[key] = counts.get(key, 0) + 1
         source_counts[source.id] = source_counts.get(source.id, 0) + 1
         host_counts[node.host] = host_counts.get(node.host, 0) + 1
+        if address_group:
+            address_groups.add(address_group)
         best_by_profile.setdefault(profile, (node, source))
         selected.append((node, source, profile))
 

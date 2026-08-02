@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
-from app.models import MetricSnapshot, Node, NodeProbeState, NodeState, Source
+from app.models import MetricSnapshot, Node, NodeProbeState, NodeState, Source, SourceQuality
 from app.models import TelegramUser
 from app.services.alerts import notify_admins, should_alert
 from app.services.github import refresh_source
@@ -36,13 +36,22 @@ def refresh_all_sources() -> None:
             logging.info("source=%s status=%s found=%s", source.id, run.status, run.found_count)
             if run.status == "processed":
                 after = db.execute(select(Node.id, Node.state).where(Node.source_id == source.id)).all()
-                priority_node_ids.extend(
+                new_ids = [
                     node_id for node_id, state in after
                     if node_id not in before or (before[node_id] == NodeState.REMOVED and state != NodeState.REMOVED)
-                )
+                ]
+                priority_node_ids.extend(new_ids)
+            else:
+                new_ids = []
+            quality = db.get(SourceQuality, source.id)
+            if quality is None:
+                quality = SourceQuality(source_id=source.id)
+                db.add(quality)
+            quality.new_nodes_last_run = len(new_ids)
             if run.status in {"error", "guarded"}:
                 if asyncio.run(should_alert(f"source:{source.id}:{run.status}")):
                     asyncio.run(notify_admins(f"Источник {source.name}: {run.message or run.status}"))
+        db.commit()
         if priority_node_ids:
             logging.info("new source nodes queued for immediate probe=%s", len(priority_node_ids))
             ok, total = check_active_nodes(db, priority_node_ids=priority_node_ids)
