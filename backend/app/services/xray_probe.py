@@ -274,7 +274,7 @@ def probe_config(
         errors: list[str] = []
         proxy = f"socks5://127.0.0.1:{port}"
         with httpx.Client(proxy=proxy, timeout=timeout_seconds, follow_redirects=True) as client:
-            for url in urls:
+            for index, url in enumerate(urls):
                 started = time.perf_counter()
                 try:
                     response = client.get(url, headers={"User-Agent": "ZazaVPN-Health/1.0"})
@@ -283,10 +283,13 @@ def probe_config(
                     latencies.append((time.perf_counter() - started) * 1000)
                 except httpx.HTTPError as exc:
                     errors.append(f"{urlsplit(url).hostname}: {type(exc).__name__}")
+                remaining = len(urls) - index - 1
+                if successes + remaining < required_successes:
+                    break
 
             if successes < required_successes:
                 return ProbeResult(
-                    False, "http", True, True, successes, len(urls),
+                    False, "http", True, True, successes, index + 1,
                     round(sum(latencies) / len(latencies), 2) if latencies else None,
                     error="; ".join(errors)[:500] or "not enough successful HTTP probes",
                 )

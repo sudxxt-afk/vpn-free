@@ -1,4 +1,6 @@
-from concurrent.futures import ThreadPoolExecutor
+import logging
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import case, select
@@ -108,14 +110,19 @@ def check_active_nodes(db: Session) -> tuple[int, int]:
     selected = _selected_nodes(db)
     if not selected:
         return 0, 0
-    with ThreadPoolExecutor(max_workers=max(1, settings.health_probe_concurrency)) as executor:
-        results = list(executor.map(_probe, [raw for _, raw in selected]))
     ok = 0
-    for (node_id, _raw), result in zip(selected, results, strict=True):
-        node = db.get(Node, node_id)
-        if node is None or node.state == NodeState.REMOVED:
-            continue
-        apply_probe_result(db, node, result)
-        ok += int(result.success)
-    db.commit()
+    stages: Counter[str] = Counter()
+    with ThreadPoolExecutor(max_workers=max(1, settings.health_probe_concurrency)) as executor:
+        futures = {executor.submit(_probe, ciphertext): node_id for node_id, ciphertext in selected}
+        for future in as_completed(futures):
+            node_id = futures[future]
+            result = future.result()
+            node = db.get(Node, node_id)
+            if node is None or node.state == NodeState.REMOVED:
+                continue
+            apply_probe_result(db, node, result)
+            db.commit()
+            ok += int(result.success)
+            stages[result.stage] += 1
+    logging.info("xray probe batch passed=%s total=%s stages=%s", ok, len(selected), dict(stages))
     return ok, len(selected)

@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     source_refresh_minutes: int = 40
     health_check_minutes: int = 10
     health_probe_batch_size: int = 60
-    health_probe_concurrency: int = 2
-    health_probe_timeout_seconds: float = 8.0
+    health_probe_concurrency: int = 3
+    health_probe_timeout_seconds: float = 6.0
     health_probe_fresh_minutes: int = 45
     health_probe_urls: str = "https://cp.cloudflare.com/generate_204,https://www.gstatic.com/generate_204,https://connectivitycheck.platform.hicloud.com/generate_204"
     health_probe_required_successes: int = 2
