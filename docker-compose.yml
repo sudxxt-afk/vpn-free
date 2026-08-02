@@ -40,7 +40,7 @@ services:
       - postgres_backups:/backups
     healthcheck:
       test: ["CMD-SHELL", "find /backups/daily -name '*.dump.enc' -mtime -2 -type f | grep -q ."]
-      interval: 1h
+      interval: 30s
       timeout: 10s
       retries: 3
     restart: unless-stopped
