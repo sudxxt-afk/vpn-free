@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import Node, NodeProbeState, NodeState, Source
-from app.services.health import apply_probe_result
+from app.services.health import _selected_nodes, apply_probe_result
 from app.services.github import SourceError, normalize_github_url
 from app.services.parser import parse_config, parse_payload, transport_key, with_display_name
 from app.services.xray_probe import ProbeConfigError, ProbeResult, build_xray_config
@@ -60,6 +60,26 @@ class GitHubUrlTests(unittest.TestCase):
 
 
 class XrayProbeTests(unittest.TestCase):
+    def test_fresh_source_nodes_are_selected_before_the_regular_pool(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            enabled = Source(name="enabled", github_url="https://github.com/a/enabled", raw_url="https://raw.githubusercontent.com/a/enabled/main/list")
+            disabled = Source(name="disabled", github_url="https://github.com/a/disabled", raw_url="https://raw.githubusercontent.com/a/disabled/main/list", is_enabled=False)
+            db.add_all([enabled, disabled]); db.flush()
+            active = Node(source_id=enabled.id, fingerprint="1" * 64, protocol="vless", host="8.8.8.8", port=443,
+                          config_ciphertext="active", state=NodeState.ACTIVE, score=99)
+            priority = Node(source_id=enabled.id, fingerprint="2" * 64, protocol="vless", host="8.8.4.4", port=443,
+                            config_ciphertext="priority", state=NodeState.CANDIDATE)
+            ignored = Node(source_id=disabled.id, fingerprint="3" * 64, protocol="vless", host="1.1.1.1", port=443,
+                           config_ciphertext="ignored", state=NodeState.CANDIDATE)
+            db.add_all([active, priority, ignored]); db.commit()
+            selected = _selected_nodes(db, [priority.id, ignored.id])
+            self.assertEqual(selected[0][0], priority.id)
+            self.assertNotIn(ignored.id, [node_id for node_id, _ in selected])
+        engine.dispose()
+
     def test_reality_requires_public_key_and_builds_strict_stream(self):
         invalid = "vless://d5e9a2ee-1111-4444-9999-aaaaaaaaaaaa@8.8.8.8:443?security=reality&type=tcp&sni=example.com&fp=chrome"
         with self.assertRaisesRegex(ProbeConfigError, "requires pbk"):

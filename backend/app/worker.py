@@ -29,12 +29,24 @@ settings = get_settings()
 def refresh_all_sources() -> None:
     with SessionLocal() as db:
         sources = db.scalars(select(Source).where(Source.is_enabled.is_(True))).all()
+        priority_node_ids = []
         for source in sources:
+            before = dict(db.execute(select(Node.id, Node.state).where(Node.source_id == source.id)).all())
             run = refresh_source(db, source)
             logging.info("source=%s status=%s found=%s", source.id, run.status, run.found_count)
+            if run.status == "processed":
+                after = db.execute(select(Node.id, Node.state).where(Node.source_id == source.id)).all()
+                priority_node_ids.extend(
+                    node_id for node_id, state in after
+                    if node_id not in before or (before[node_id] == NodeState.REMOVED and state != NodeState.REMOVED)
+                )
             if run.status in {"error", "guarded"}:
                 if asyncio.run(should_alert(f"source:{source.id}:{run.status}")):
                     asyncio.run(notify_admins(f"Источник {source.name}: {run.message or run.status}"))
+        if priority_node_ids:
+            logging.info("new source nodes queued for immediate probe=%s", len(priority_node_ids))
+            ok, total = check_active_nodes(db, priority_node_ids=priority_node_ids)
+            logging.info("immediate source probe successful=%s total=%s", ok, total)
 
 
 def health_check() -> None:

@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from app import bot as bot_module
 from app.database import Base
 from app.main import claim_ticket, create_broadcast, create_support_ticket, require_bot_admin, resolve_telegram_identity
-from app.models import AdminUser, BroadcastCampaign, Device, Donation, Role, TelegramUser
+from app.models import AdminUser, BroadcastCampaign, Device, Donation, Node, NodeState, Role, Source, TelegramUser
 from app.schemas import BroadcastCreate, SupportTicketCreate
 from app.services.analytics import daily_retention_cohorts, sequential_funnel
 from app.services.broadcasts import _recipient_query, _send_delivery, format_broadcast_report
@@ -23,6 +23,7 @@ from app.services.broadcast_drafts import BroadcastDraftStore
 from app.services.donations import (DonationError, complete_star_donation, create_star_donation,
                                     match_ton_transaction, validate_star_checkout)
 from app.services.telegram_html import sanitize_telegram_html
+from app import worker as worker_module
 from app.worker import configure_scheduler
 
 
@@ -373,9 +374,38 @@ class WorkerSchedulerTests(unittest.TestCase):
             jobs = {job.id: job for job in scheduler.get_jobs()}
             self.assertIn("broadcasts", jobs)
             self.assertEqual(jobs["broadcasts"].trigger.interval.total_seconds(), 5)
+            self.assertEqual(jobs["sources"].trigger.interval.total_seconds(), 20 * 60)
             self.assertIsNotNone(jobs["broadcasts"].next_run_time)
         finally:
             scheduler.shutdown(wait=False)
+
+    def test_changed_source_immediately_probes_new_nodes(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            source = Source(name="source", github_url="https://github.com/a/source", raw_url="https://raw.githubusercontent.com/a/source/main/list")
+            db.add(source); db.commit(); source_id = source.id
+        captured: list = []
+
+        def fake_refresh(db, source):
+            db.add(Node(source_id=source.id, fingerprint="4" * 64, protocol="vless", host="8.8.8.8", port=443,
+                        config_ciphertext="new", state=NodeState.CANDIDATE))
+            db.commit()
+            return SimpleNamespace(status="processed", found_count=1, message=None)
+
+        def fake_check(_db, priority_node_ids=None):
+            captured.extend(priority_node_ids or [])
+            return len(captured), len(captured)
+
+        with patch.object(worker_module, "SessionLocal", Session), \
+             patch.object(worker_module, "refresh_source", side_effect=fake_refresh), \
+             patch.object(worker_module, "check_active_nodes", side_effect=fake_check):
+            worker_module.refresh_all_sources()
+        self.assertEqual(len(captured), 1)
+        with Session() as db:
+            self.assertEqual(db.get(Node, captured[0]).source_id, source_id)
+        engine.dispose()
 
 
 if __name__ == "__main__":
