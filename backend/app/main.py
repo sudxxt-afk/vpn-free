@@ -1034,9 +1034,6 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
     user = db.get(TelegramUser, device.user_id)
     if not user or user.is_blocked or not await has_required_memberships(db, user):
         raise HTTPException(status_code=403, detail="Выполните условия доступа в Telegram-боте")
-    partner = await get_partner_access(db, user, device.slot)
-    if not partner.allowed:
-        raise HTTPException(status_code=403, detail="Выполните условия партнёрского доступа в Telegram-боте")
     track_event(db, "subscription_open", user_id=user.id, device_id=device.id)
     policy = pool_policy(db)
     rows = db.execute(
