@@ -64,7 +64,9 @@ async def get_partner_access(db: Session, user: TelegramUser, target_devices: in
         logger.info("SubGram gate is disabled; allowing access without partner gate")
         return PartnerDecision(True, tier=tier)
 
-    action = "subscribe" if gate.pending_tier == tier else "newtask"
+    # `subscribe` pins one task to this user. A repeat call then checks the
+    # same task; `newtask` would create a different sponsor list every time.
+    action = "subscribe"
     payload = {"user_id": user.telegram_id, "chat_id": user.telegram_id, "action": action,
                "max_sponsors": TIER_SPONSORS[tier], "get_links": 1}
     try:
