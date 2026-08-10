@@ -1,8 +1,8 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -80,6 +80,86 @@ class PiarFlowTask(Base):
     tier: Mapped[int] = mapped_column(Integer)
     links_json: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class PiarFlowAccessState(Base):
+    """Current one-time PiarFlow onboarding state for a Telegram user."""
+    __tablename__ = "piarflow_access_states"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("telegram_users.id", ondelete="CASCADE"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), default="new", index=True)
+    links_json: Mapped[str] = mapped_column(Text, default="[]")
+    pending_links_json: Mapped[str] = mapped_column(Text, default="[]")
+    task_count: Mapped[int] = mapped_column(Integer, default=0)
+    prompted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class PiarFlowEvent(Base):
+    """Immutable local events used to measure the PiarFlow access funnel."""
+    __tablename__ = "piarflow_events"
+    id: Mapped[uuid.UUID] = uuid_column()
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("telegram_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    task_count: Mapped[int] = mapped_column(Integer, default=0)
+    revoked_devices: Mapped[int] = mapped_column(Integer, default=0)
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class PiarFlowBotSnapshot(Base):
+    __tablename__ = "piarflow_bot_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    bot_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    username: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    topic: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    max_sponsors: Mapped[int] = mapped_column(Integer, default=0)
+    reset_time: Mapped[int] = mapped_column(Integer, default=0)
+    sold_subs: Mapped[int] = mapped_column(Integer, default=0)
+    not_counted: Mapped[int] = mapped_column(Integer, default=0)
+    earned: Mapped[float] = mapped_column(Float, default=0.0)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PiarFlowDailyStat(Base):
+    __tablename__ = "piarflow_daily_stats"
+    date: Mapped[date] = mapped_column(Date, primary_key=True)
+    sold_subs: Mapped[int] = mapped_column(Integer, default=0)
+    earned: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class SubscriptionCutover(Base):
+    __tablename__ = "subscription_cutovers"
+    id: Mapped[uuid.UUID] = uuid_column()
+    cutover_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    reason: Mapped[str] = mapped_column(String(40))
+    retired_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RetiredSubscription(Base):
+    """Recognises an old HAPP URL after its Device row has been removed."""
+    __tablename__ = "retired_subscriptions"
+    id: Mapped[uuid.UUID] = uuid_column()
+    original_device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("telegram_users.id", ondelete="CASCADE"), index=True)
+    slot: Mapped[int] = mapped_column(Integer)
+    label: Mapped[str] = mapped_column(String(80))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_hint: Mapped[str] = mapped_column(String(12))
+    reason: Mapped[str] = mapped_column(String(40), index=True)
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    original_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    original_last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class Source(Base):

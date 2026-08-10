@@ -20,6 +20,7 @@ from app.services.health import check_active_nodes, purge_probe_history, retry_n
 from app.services.telegram import has_required_memberships
 from app.services.broadcasts import process_broadcasts
 from app.services.donations import verify_pending_ton_donations
+from app.services.piarflow import PiarFlowError, sync_piarflow_stats
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
@@ -183,6 +184,16 @@ def ton_donation_check() -> None:
         logging.exception("TON donation verification failed")
 
 
+def piarflow_stats_check() -> None:
+    try:
+        with SessionLocal() as db:
+            synced = asyncio.run(sync_piarflow_stats(db))
+        if synced:
+            logging.info("PiarFlow daily stats synced=%s", synced)
+    except PiarFlowError:
+        logging.exception("PiarFlow stats sync failed")
+
+
 def configure_scheduler(scheduler: BaseScheduler) -> None:
     """Register recurring work without blocking queue processing at boot."""
     run_now = datetime.now(timezone.utc)
@@ -212,6 +223,8 @@ def configure_scheduler(scheduler: BaseScheduler) -> None:
     scheduler.add_job(infrastructure_check, "interval", minutes=settings.alert_check_minutes, id="infrastructure", max_instances=1, coalesce=True)
     scheduler.add_job(process_broadcasts, "interval", seconds=5, id="broadcasts", max_instances=1, coalesce=True, next_run_time=run_now)
     scheduler.add_job(ton_donation_check, "interval", seconds=15, id="ton-donations", max_instances=1, coalesce=True)
+    scheduler.add_job(piarflow_stats_check, "interval", minutes=15, id="piarflow-stats", max_instances=1, coalesce=True,
+                      next_run_time=run_now + timedelta(minutes=5))
 
 
 if __name__ == "__main__":

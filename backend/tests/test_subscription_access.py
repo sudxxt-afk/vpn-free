@@ -1,13 +1,16 @@
 import asyncio
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from fastapi import HTTPException
 
 from app.database import Base
-from app.main import subscription
-from app.models import Device, TelegramUser
+from app.main import piarflow_webhook, subscription
+from app.models import Device, PiarFlowAccessState, PiarFlowBotSnapshot, RetiredSubscription, TelegramUser
+from app.schemas import PiarFlowWebhookPayload
 from app.security import hash_token
 from app.services.piarflow import PartnerDecision
 
@@ -34,6 +37,7 @@ class SubscriptionAccessTests(unittest.TestCase):
                 token_hash=hash_token(token),
                 token_hint="token",
             ))
+            db.add(PiarFlowAccessState(user_id=user.id, status="completed"))
             db.commit()
 
             with patch("app.main.get_partner_access", AsyncMock(return_value=PartnerDecision(False))) as partner:
@@ -41,3 +45,49 @@ class SubscriptionAccessTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             partner.assert_not_awaited()
+
+    def test_retired_subscription_returns_happ_reissue_notice(self):
+        with self.Session() as db:
+            user = TelegramUser(telegram_id=1002, username="retired")
+            db.add(user)
+            db.flush()
+            token = "retired-device-token"
+            db.add(RetiredSubscription(
+                original_device_id=user.id,
+                user_id=user.id,
+                slot=1,
+                label="Phone",
+                token_hash=hash_token(token),
+                token_hint="retired",
+                reason="global_reissue",
+            ))
+            db.commit()
+
+            response = asyncio.run(subscription(token, db))
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["support-url"], "https://t.me/zazaaVPN_bot?start=reissue")
+            self.assertTrue(response.headers["announce"].startswith("base64:"))
+            self.assertNotIn("vless://", response.body.decode())
+
+    def test_unknown_subscription_stays_not_found(self):
+        with self.Session() as db, self.assertRaises(HTTPException) as raised:
+            asyncio.run(subscription("unknown-device-token", db))
+        self.assertEqual(raised.exception.status_code, 404)
+
+    def test_webhook_test_is_side_effect_free_and_unsubscribe_revokes(self):
+        with self.Session() as db, patch("app.main.settings", SimpleNamespace(piarflow_webhook_secret="secret")):
+            user = TelegramUser(telegram_id=2001)
+            db.add(user)
+            db.flush()
+            db.add(PiarFlowAccessState(user_id=user.id, status="completed"))
+            db.add(PiarFlowBotSnapshot(id=1, bot_id=10))
+            db.add(Device(user_id=user.id, slot=1, label="Phone", token_hash=hash_token("live"), token_hint="live"))
+            db.commit()
+
+            self.assertTrue(piarflow_webhook("secret", PiarFlowWebhookPayload(test=True), db)["test"])
+            result = piarflow_webhook("secret", PiarFlowWebhookPayload(
+                tg_user_id=2001, offer_link="https://t.me/sponsor", status="unsubscribed", bot_id=10,
+            ), db)
+            self.assertEqual(result["revoked_devices"], 1)
+            self.assertEqual(db.query(Device).count(), 0)

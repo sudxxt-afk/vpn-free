@@ -2,16 +2,17 @@ import asyncio
 import io
 import logging
 from html import escape
+from typing import Any, Awaitable, Callable
 from urllib.parse import quote, urlparse
 
 import httpx
 import qrcode
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup,
-                           InputMediaPhoto, LabeledPrice, Message, PreCheckoutQuery)
+                           InputMediaPhoto, LabeledPrice, Message, PreCheckoutQuery, TelegramObject)
 from aiogram.utils.text_decorations import html_decoration
 
 from app.config import get_settings
@@ -318,11 +319,14 @@ async def allowed(telegram_id: int, target_devices: int = 1) -> dict:
     return await api("POST", f"/internal/users/{telegram_id}/access", params={"target_devices": target_devices})
 
 
-def sponsor_gate_screen(access: dict, target_devices: int) -> tuple[str, InlineKeyboardMarkup]:
+async def access_status(telegram_id: int) -> dict:
+    return await api("GET", f"/internal/users/{telegram_id}/access")
+
+
+def sponsor_gate_screen(access: dict) -> tuple[str, InlineKeyboardMarkup]:
     sponsors = access.get("sponsors") or []
     total = max(len(sponsors), int(access.get("sponsor_total") or 0))
     completed = max(0, total - len(sponsors))
-    package = "1-2 устройства" if target_devices <= 2 else "3-5 устройств" if target_devices <= 5 else "6-8 устройств"
     buttons = [
         [InlineKeyboardButton(text=f"{index}. Открыть задание", url=item["link"])]
         for index, item in enumerate(sponsors, start=completed + 1)
@@ -330,37 +334,63 @@ def sponsor_gate_screen(access: dict, target_devices: int) -> tuple[str, InlineK
     buttons.append([
         InlineKeyboardButton(
             text=f"Проверить выполнение ({completed}/{total})",
-            callback_data=f"vpn:check:{target_devices}",
+            callback_data="piarflow:check",
         )
     ])
     return (
-        f"🔓 <b>Открой пакет: {package}</b>\n\n"
-        f"Для устройства {target_devices} выполни задания PiarFlow: <b>{completed} из {total}</b>.\n"
-        "Открой каждое задание ниже, подпишись, затем нажми «Проверить выполнение».",
+        "🔐 <b>Доступ к бесплатному VPN</b>\n\n"
+        "Zaza VPN полностью бесплатный. Серверы, проверка конфигов и поддержка стоят денег — админам тоже надо кушать.\n\n"
+        f"Подпишись на спонсоров: <b>{completed} из {total}</b> выполнено. Затем снова отправь /start или нажми «Проверить выполнение».",
         InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
 
-async def show_access_gate(callback: CallbackQuery, access: dict, target_devices: int) -> None:
+async def show_access_gate(target: Message | CallbackQuery, access: dict) -> None:
     sponsors = access.get("sponsors") or []
     if sponsors:
-        text, reply_markup = sponsor_gate_screen(access, target_devices)
-        await edit_callback_screen(
-            callback,
-            text,
-            reply_markup=reply_markup,
-        )
+        text, reply_markup = sponsor_gate_screen(access)
+    else:
+        text = access.get("reason") or "Сначала запусти бота командой /start и выполни задания PiarFlow."
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Проверить ещё раз", callback_data="piarflow:check")],
+        ])
+    if isinstance(target, CallbackQuery):
+        await edit_callback_screen(target, text, reply_markup=reply_markup)
+        await target.answer()
         return
-    channels = await api("GET", "/internal/channels")
-    lines = ["🔒 Для доступа подпишитесь на обязательные каналы:"]
-    for channel in channels:
-        link = f"https://t.me/{channel['username'].lstrip('@')}" if channel.get("username") else str(channel["chat_id"])
-        lines.append(f"• {channel['title']} — {link}")
-    await edit_callback_screen(
-        callback,
-        "\n".join(lines) if channels else (access.get("reason") or "Доступ пока недоступен"),
-        reply_markup=menu(),
-    )
+    await target.answer(text, reply_markup=reply_markup)
+
+
+class PiarFlowGateMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        if not settings.piarflow_enabled or not settings.piarflow_api_key:
+            return await handler(event, data)
+        if isinstance(event, Message):
+            parts = (event.text or "").split(maxsplit=1)
+            command = parts[0].split("@", 1)[0] if parts else ""
+            if command == "/start" or event.successful_payment:
+                return await handler(event, data)
+        elif isinstance(event, CallbackQuery):
+            if event.data == "piarflow:check":
+                return await handler(event, data)
+        else:
+            return await handler(event, data)
+        telegram_id = await ensure_user(event)
+        access = await access_status(telegram_id)
+        if access.get("allowed"):
+            return await handler(event, data)
+        await show_access_gate(event, access)
+        return None
+
+
+piarflow_gate = PiarFlowGateMiddleware()
+dp.message.outer_middleware(piarflow_gate)
+dp.callback_query.outer_middleware(piarflow_gate)
 
 
 async def send_subscription(target: Message | CallbackQuery, device: dict) -> None:
@@ -431,7 +461,15 @@ async def start(message: Message) -> None:
         await api("POST", f"/internal/users/{telegram_id}/events", json={"event_type": "bot_start"})
     except Exception:
         logging.exception("Unable to record bot start analytics event")
-    await message.answer("👋 <b>Добро пожаловать в Zaza VPN</b>\n\nБесплатный VPN с автоматическим выбором сильной ноды для Wi‑Fi и LTE.", reply_markup=menu())
+    access = await allowed(telegram_id)
+    if not access.get("allowed"):
+        await show_access_gate(message, access)
+        return
+    notice = "\n\nСейчас у PiarFlow нет доступных заданий. При следующем /start проверю снова." if access.get("status") == "deferred_no_inventory" else ""
+    await message.answer(
+        "👋 <b>Добро пожаловать в Zaza VPN</b>\n\nБесплатный VPN с автоматическим выбором сильной ноды для Wi‑Fi и LTE." + notice,
+        reply_markup=menu(),
+    )
 
 
 @dp.message(Command("donate"))
@@ -939,10 +977,9 @@ async def access_flow(callback: CallbackQuery) -> None:
         await callback.answer()
         return
     target_devices = len(devices) + 1
-    access = await allowed(telegram_id, target_devices)
+    access = await access_status(telegram_id)
     if not access["allowed"]:
-        await show_access_gate(callback, access, target_devices)
-        await callback.answer()
+        await show_access_gate(callback, access)
         return
     device = await api("POST", f"/internal/users/{telegram_id}/devices", json={"label": f"Устройство {len(devices) + 1}"})
     await send_subscription(callback, device)
@@ -955,15 +992,25 @@ async def legacy_menu_buttons(callback: CallbackQuery) -> None:
     await access_flow(callback)
 
 
-@dp.callback_query(F.data.startswith("vpn:check:"))
+@dp.callback_query(F.data == "piarflow:check")
 async def check_partner_gate(callback: CallbackQuery) -> None:
-    await access_flow(callback)
+    telegram_id = await ensure_user(callback)
+    access = await allowed(telegram_id)
+    if not access.get("allowed"):
+        await show_access_gate(callback, access)
+        return
+    await edit_callback_screen(
+        callback,
+        "✅ <b>Подписки подтверждены</b>\n\nДоступ открыт. Теперь можно получить новую VPN-подписку.",
+        reply_markup=menu(),
+    )
+    await callback.answer("Доступ открыт")
 
 
 @dp.callback_query(F.data.startswith("vpn:rotate:"))
 async def rotate(callback: CallbackQuery) -> None:
     telegram_id = await ensure_user(callback)
-    access = await allowed(telegram_id)
+    access = await access_status(telegram_id)
     if not access["allowed"]:
         await callback.answer("Сначала выполните условия доступа", show_alert=True)
         return
