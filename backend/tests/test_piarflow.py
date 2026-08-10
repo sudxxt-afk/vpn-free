@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import PiarFlowTask, SponsorGate, TelegramUser
+from app.bot import sponsor_gate_screen
 from app.services.piarflow import get_partner_access
 
 
@@ -19,6 +20,23 @@ class PiarFlowTests(unittest.TestCase):
 
     def tearDown(self):
         self.engine.dispose()
+
+    def test_sponsor_screen_numbers_remaining_tasks_and_shows_progress(self):
+        text, markup = sponsor_gate_screen({
+            "sponsor_total": 4,
+            "sponsors": [
+                {"link": "https://piarflow.com/track?a", "button_text": "ignored"},
+                {"link": "https://piarflow.com/track?b", "button_text": "ignored"},
+            ],
+        }, 1)
+
+        self.assertIn("2 из 4", text)
+        self.assertIn("пакет: 1-2 устройства", text)
+        self.assertEqual([row[0].text for row in markup.inline_keyboard], [
+            "3. Открыть задание",
+            "4. Открыть задание",
+            "Проверить выполнение (2/4)",
+        ])
 
     def test_issue_then_check_the_same_sponsor_links(self):
         requests: list[tuple[str, dict]] = []
@@ -61,6 +79,7 @@ class PiarFlowTests(unittest.TestCase):
             first = asyncio.run(get_partner_access(db, user, 1))
             self.assertFalse(first.allowed)
             self.assertEqual(first.sponsors[0].link, "https://t.me/sponsor")
+            self.assertEqual(first.sponsor_total, 1)
             self.assertIsNotNone(db.get(PiarFlowTask, user.id))
 
             second = asyncio.run(get_partner_access(db, user, 1))

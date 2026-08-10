@@ -318,16 +318,37 @@ async def allowed(telegram_id: int, target_devices: int = 1) -> dict:
     return await api("POST", f"/internal/users/{telegram_id}/access", params={"target_devices": target_devices})
 
 
+def sponsor_gate_screen(access: dict, target_devices: int) -> tuple[str, InlineKeyboardMarkup]:
+    sponsors = access.get("sponsors") or []
+    total = max(len(sponsors), int(access.get("sponsor_total") or 0))
+    completed = max(0, total - len(sponsors))
+    package = "1-2 устройства" if target_devices <= 2 else "3-5 устройств" if target_devices <= 5 else "6-8 устройств"
+    buttons = [
+        [InlineKeyboardButton(text=f"{index}. Открыть задание", url=item["link"])]
+        for index, item in enumerate(sponsors, start=completed + 1)
+    ]
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"Проверить выполнение ({completed}/{total})",
+            callback_data=f"vpn:check:{target_devices}",
+        )
+    ])
+    return (
+        f"🔓 <b>Открой пакет: {package}</b>\n\n"
+        f"Для устройства {target_devices} выполни задания PiarFlow: <b>{completed} из {total}</b>.\n"
+        "Открой каждое задание ниже, подпишись, затем нажми «Проверить выполнение».",
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
 async def show_access_gate(callback: CallbackQuery, access: dict, target_devices: int) -> None:
     sponsors = access.get("sponsors") or []
     if sponsors:
-        buttons = [[InlineKeyboardButton(text=f"➕ {item['button_text']}", url=item["link"])] for item in sponsors]
-        buttons.append([InlineKeyboardButton(text="✅ Проверить подписки", callback_data=f"vpn:check:{target_devices}")])
+        text, reply_markup = sponsor_gate_screen(access, target_devices)
         await edit_callback_screen(
             callback,
-            f"🔒 <b>Нужны подписки для доступа</b>\n\n{access.get('reason') or 'Подпишитесь на партнёрские каналы'}.\n"
-            "Откройте все каналы кнопками ниже, затем нажмите «Проверить подписки».",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+            text,
+            reply_markup=reply_markup,
         )
         return
     channels = await api("GET", "/internal/channels")

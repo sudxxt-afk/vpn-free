@@ -29,6 +29,7 @@ class PartnerDecision:
     allowed: bool
     tier: int | None = None
     sponsors: tuple[Sponsor, ...] = ()
+    sponsor_total: int = 0
     reason: str | None = None
 
 
@@ -117,7 +118,13 @@ async def get_partner_access(db: Session, user: TelegramUser, target_devices: in
             body, _status = await _post("/sponsors/check", {"user_id": user.telegram_id, "links": links})
             checked = _sponsors(list((body or {}).get("sponsors") or []))
             if checked:
-                return PartnerDecision(False, tier=tier, sponsors=checked, reason=tier_copy(tier))
+                return PartnerDecision(
+                    False,
+                    tier=tier,
+                    sponsors=checked,
+                    sponsor_total=len(links),
+                    reason=tier_copy(tier),
+                )
             gate.completed_tier = tier
             gate.pending_tier = None
             db.delete(task)
@@ -148,7 +155,13 @@ async def get_partner_access(db: Session, user: TelegramUser, target_devices: in
             task.links_json = json.dumps([item.link for item in sponsors])
         gate.pending_tier = tier
         db.commit()
-        return PartnerDecision(False, tier=tier, sponsors=sponsors, reason=tier_copy(tier))
+        return PartnerDecision(
+            False,
+            tier=tier,
+            sponsors=sponsors,
+            sponsor_total=len(sponsors),
+            reason=tier_copy(tier),
+        )
     except PiarFlowError as exc:
         logger.warning("PiarFlow request failed, denying access: %s", exc)
         return PartnerDecision(False, tier=tier, reason="Партнёрская проверка временно недоступна. Попробуйте позже.")

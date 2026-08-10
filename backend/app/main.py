@@ -725,6 +725,7 @@ async def bot_access(telegram_id: int, target_devices: int = 1, db: Session = De
         "reason": decision.reason,
         "tier": decision.tier,
         "sponsors": [{"link": item.link, "title": item.title, "button_text": item.button_text} for item in decision.sponsors],
+        "sponsor_total": decision.sponsor_total,
     }
 
 
