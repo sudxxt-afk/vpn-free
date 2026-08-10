@@ -26,7 +26,7 @@ from app.services.github import SourceError, normalize_github_url, refresh_sourc
 from app.services.parser import address_diversity_key, classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.health import verified_pool_conditions
 from app.services.telegram import has_required_memberships, validate_bot_admin
-from app.services.subgram import get_partner_access
+from app.services.piarflow import get_partner_access
 from app.services.rate_limit import is_allowed
 from app.services.telegram_html import sanitize_telegram_html
 from app.services.analytics import daily_retention_cohorts, sequential_funnel

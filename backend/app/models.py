@@ -64,12 +64,21 @@ class Device(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class PartnerGate(Base):
-    """The highest partner-access tier a Telegram user has completed."""
-    __tablename__ = "partner_gates"
+class SponsorGate(Base):
+    """The highest PiarFlow sponsor tier a Telegram user has completed."""
+    __tablename__ = "sponsor_gates"
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("telegram_users.id", ondelete="CASCADE"), primary_key=True)
     completed_tier: Mapped[int] = mapped_column(Integer, default=0)
     pending_tier: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class PiarFlowTask(Base):
+    """Links returned by PiarFlow, retained for the matching check request."""
+    __tablename__ = "piarflow_tasks"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("telegram_users.id", ondelete="CASCADE"), primary_key=True)
+    tier: Mapped[int] = mapped_column(Integer)
+    links_json: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
