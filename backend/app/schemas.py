@@ -96,6 +96,18 @@ class NodeResponse(BaseModel):
     probe_throughput_kbps: float | None = None
     probe_error: str | None = None
     probe_checked_at: datetime | None = None
+    probe_grace_until: datetime | None = None
+
+
+class NodeProbeAttemptResponse(BaseModel):
+    stage: str
+    failure_class: str
+    http_successes: int
+    http_attempts: int
+    latency_ms: float | None = None
+    throughput_kbps: float | None = None
+    error: str | None = None
+    checked_at: datetime
 
 
 class PoolPolicyPayload(BaseModel):

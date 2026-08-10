@@ -15,15 +15,16 @@ from app.config import get_settings
 from app.crypto import decrypt
 from app.database import Base, SessionLocal, engine, get_db
 from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, BroadcastDelivery, Device, Donation, MetricSnapshot,
-                        Node, NodeProbeState, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceQuality, SourceRun, SupportMessage, SupportTicket, TelegramUser)
+                        Node, NodeProbeAttempt, NodeProbeState, NodeState, PoolPolicy, RequiredChannel, Role, Source, SourceQuality, SourceRun, SupportMessage, SupportTicket, TelegramUser)
 from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLookup, BotUserRequest, BroadcastCreate, ChannelCreate, ChannelResponse, DashboardResponse,
                          DeviceCreate, DeviceResponse, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
                          AnalyticsCohortResponse, AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
-                         NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, StarDonationComplete,
+                         NodeProbeAttemptResponse, NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, StarDonationComplete,
                          StarDonationIntent, StarDonationPreCheckout, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_github_url, refresh_source
 from app.services.parser import address_diversity_key, classify_network_profile, display_region, parse_config, transport_key, with_display_name
+from app.services.health import verified_pool_conditions
 from app.services.telegram import has_required_memberships, validate_bot_admin
 from app.services.subgram import get_partner_access
 from app.services.rate_limit import is_allowed
@@ -170,6 +171,9 @@ def node_response(node: Node, source: Source | None = None, probe: NodeProbeStat
         profile, profile_priority = classify_network_profile(raw_config, node.protocol)
     region_emoji, region = display_region(raw_config, node.host)
     mobile = profile == "mobile"
+    grace_until = None
+    if probe and probe.stage == "retrying" and probe.last_success_at:
+        grace_until = probe.last_success_at + timedelta(minutes=settings.health_failure_grace_minutes)
     return NodeResponse(
         id=node.id, protocol=node.protocol, host=node.host, port=node.port, state=node.state, score=node.score,
         avg_latency_ms=node.avg_latency_ms, success_checks=node.success_checks, failed_checks=node.failed_checks,
@@ -180,18 +184,7 @@ def node_response(node: Node, source: Source | None = None, probe: NodeProbeStat
         probe_throughput_kbps=probe.throughput_kbps if probe else None,
         probe_error=probe.last_error if probe else None,
         probe_checked_at=probe.last_checked_at if probe else None,
-    )
-
-
-def _verified_pool_conditions() -> tuple:
-    fresh_after = datetime.now(timezone.utc) - timedelta(minutes=settings.health_probe_fresh_minutes)
-    return (
-        Source.is_enabled.is_(True),
-        Node.state == NodeState.ACTIVE,
-        NodeProbeState.stage == "passed",
-        NodeProbeState.static_valid.is_(True),
-        NodeProbeState.xray_started.is_(True),
-        NodeProbeState.last_success_at >= fresh_after,
+        probe_grace_until=grace_until,
     )
 
 
@@ -200,13 +193,13 @@ def verified_pool_summary(db: Session) -> tuple[int, float | None]:
         select(func.count()).select_from(Node)
         .join(Source, Source.id == Node.source_id)
         .join(NodeProbeState, NodeProbeState.node_id == Node.id)
-        .where(*_verified_pool_conditions())
+        .where(*verified_pool_conditions())
     ) or 0
     ping = db.scalar(
         select(func.avg(Node.avg_latency_ms)).select_from(Node)
         .join(Source, Source.id == Node.source_id)
         .join(NodeProbeState, NodeProbeState.node_id == Node.id)
-        .where(*_verified_pool_conditions())
+        .where(*verified_pool_conditions())
     )
     return active, ping
 
@@ -519,6 +512,25 @@ def list_nodes(request: Request, db: Session = Depends(get_db), limit: int = 100
     ).all()
     response = [node_response(node, source, probe) for node, source, probe in rows]
     return sorted(response, key=lambda item: (item.profile_priority, item.score), reverse=True)
+
+
+@app.get("/admin/nodes/{node_id}/probes", response_model=list[NodeProbeAttemptResponse])
+def node_probe_history(node_id: UUID, request: Request, days: int = 14, db: Session = Depends(get_db)) -> list[NodeProbeAttemptResponse]:
+    require_admin(request)
+    if not db.get(Node, node_id):
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, settings.health_probe_history_days)))
+    attempts = db.scalars(
+        select(NodeProbeAttempt)
+        .where(NodeProbeAttempt.node_id == node_id, NodeProbeAttempt.checked_at >= since)
+        .order_by(NodeProbeAttempt.checked_at.desc()).limit(100)
+    ).all()
+    return [NodeProbeAttemptResponse(
+        stage=item.stage, failure_class=item.failure_class,
+        http_successes=item.http_successes, http_attempts=item.http_attempts,
+        latency_ms=item.latency_ms, throughput_kbps=item.throughput_kbps,
+        error=item.error, checked_at=item.checked_at,
+    ) for item in attempts]
 
 
 @app.get("/admin/pool-policy", response_model=PoolPolicyResponse)
@@ -1030,7 +1042,7 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
         select(Node, Source)
         .join(Source, Source.id == Node.source_id)
         .join(NodeProbeState, NodeProbeState.node_id == Node.id)
-        .where(*_verified_pool_conditions())
+        .where(*verified_pool_conditions())
         .order_by(Node.score.desc())
     ).all()
     selected: list[tuple[Node, Source, str]] = []

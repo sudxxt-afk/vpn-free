@@ -1,18 +1,21 @@
 import base64
+import io
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from sqlalchemy import create_engine
+import httpx
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
+from unittest.mock import patch
 
 from app.database import Base
-from app.models import Node, NodeProbeState, NodeState, Source, SourceQuality
-from app.services.health import _selected_nodes, apply_probe_result, normalize_node_states, refresh_source_qualities
+from app.models import Node, NodeProbeAttempt, NodeProbeState, NodeState, Source, SourceQuality
+from app.services.health import _probe_targets, _selected_nodes, apply_probe_result, normalize_node_states, purge_probe_history, refresh_source_qualities
 from app.services.github import SourceError, normalize_github_url
 from app.services.parser import address_diversity_key, parse_config, parse_payload, transport_key, with_display_name
-from app.services.xray_probe import ProbeConfigError, ProbeResult, build_xray_config
+from app.services.xray_probe import ProbeConfigError, ProbeResult, build_xray_config, probe_config
 from app.services.scoring import calculate_score
 
 
@@ -175,6 +178,39 @@ class XrayProbeTests(unittest.TestCase):
         self.assertEqual(outbound["protocol"], "vless")
         self.assertEqual(outbound["streamSettings"]["realitySettings"]["publicKey"], "public-key")
 
+    def test_tcp_and_raw_transport_do_not_become_header_types(self):
+        tcp = build_xray_config(
+            "vless://d5e9a2ee-1111-4444-9999-aaaaaaaaaaaa@8.8.8.8:443?security=tls&type=tcp",
+            1083,
+        )["outbounds"][0]["streamSettings"]
+        raw = build_xray_config(
+            "vless://d5e9a2ee-1111-4444-9999-aaaaaaaaaaaa@8.8.8.8:443?security=tls&type=raw&headerType=http",
+            1084,
+        )["outbounds"][0]["streamSettings"]
+        self.assertEqual(tcp["tcpSettings"]["header"]["type"], "none")
+        self.assertEqual(raw["network"], "tcp")
+        self.assertEqual(raw["tcpSettings"]["header"]["type"], "http")
+
+    def test_xray_stdout_reports_configuration_error(self):
+        class Process:
+            stdin = io.StringIO()
+            stdout = io.StringIO("Failed to load config files: invalid TCP header config")
+            stderr = io.StringIO()
+
+            def poll(self):
+                return 23
+
+        with patch("app.services.xray_probe.subprocess.Popen", return_value=Process()), patch(
+            "app.services.xray_probe._wait_for_socks", return_value=False,
+        ):
+            result = probe_config(
+                "vless://d5e9a2ee-1111-4444-9999-aaaaaaaaaaaa@8.8.8.8:443?security=tls&type=tcp",
+                xray_binary="xray", urls=("https://example.com",), required_successes=1,
+                speed_url=None, min_speed_kbps=128, timeout_seconds=1,
+            )
+        self.assertEqual(result.failure_class, "config")
+        self.assertIn("invalid TCP header config", result.error or "")
+
     def test_builds_websocket_trojan_and_vmess_outbounds(self):
         trojan = build_xray_config(
             "trojan://secret@1.1.1.1:443?security=tls&type=ws&host=cdn.example.com&path=%2Fws&sni=example.com",
@@ -190,7 +226,7 @@ class XrayProbeTests(unittest.TestCase):
         self.assertEqual(vmess["protocol"], "vmess")
         self.assertEqual(vmess["streamSettings"]["grpcSettings"]["serviceName"], "service")
 
-    def test_only_full_probe_promotes_node_and_failure_quarantines_it(self):
+    def test_independent_passes_promote_and_network_failures_use_grace(self):
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)
         Session = sessionmaker(bind=engine)
@@ -200,7 +236,7 @@ class XrayProbeTests(unittest.TestCase):
             node = Node(
                 id=uuid4(), source_id=source.id, fingerprint="a" * 64,
                 protocol="vless", host="8.8.8.8", port=443, config_ciphertext="unused",
-                state=NodeState.ACTIVE, success_checks=99,
+                state=NodeState.CANDIDATE,
             )
             db.add(node); db.flush()
             apply_probe_result(db, node, ProbeResult(
@@ -209,14 +245,102 @@ class XrayProbeTests(unittest.TestCase):
             ))
             db.flush()
             probe = db.get(NodeProbeState, node.id)
+            self.assertEqual((node.state, node.success_checks, probe.stage), (NodeState.DEGRADED, 1, "passed"))
+            first_attempt = db.scalar(select(NodeProbeAttempt).where(NodeProbeAttempt.node_id == node.id))
+            first_attempt.checked_at -= timedelta(minutes=2)
+            db.flush()
+            apply_probe_result(db, node, ProbeResult(
+                True, "passed", True, True, http_successes=2, http_attempts=3,
+                latency_ms=120.0, throughput_kbps=500.0,
+            ))
+            db.flush()
             self.assertEqual((node.state, node.success_checks, probe.stage), (NodeState.ACTIVE, 2, "passed"))
             apply_probe_result(db, node, ProbeResult(
                 False, "http", True, True, http_successes=1, http_attempts=3,
-                latency_ms=250.0, error="only one endpoint",
+                latency_ms=250.0, error="only one endpoint", failure_class="network",
+            ))
+            self.assertEqual(node.state, NodeState.ACTIVE)
+            self.assertEqual(probe.stage, "retrying")
+            apply_probe_result(db, node, ProbeResult(
+                False, "http", True, True, http_successes=0, http_attempts=2,
+                error="still unavailable", failure_class="network",
             ))
             self.assertEqual(node.state, NodeState.QUARANTINED)
-            self.assertEqual(probe.last_error, "only one endpoint")
+            self.assertEqual(probe.last_error, "still unavailable")
         engine.dispose()
+
+    def test_config_and_infrastructure_failures_have_different_state_effects(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            source = Source(name="test", github_url="https://github.com/a/c", raw_url="https://raw.githubusercontent.com/a/c/main/list")
+            db.add(source); db.flush()
+            node = Node(source_id=source.id, fingerprint="c" * 64, protocol="vless", host="8.8.8.8", port=443,
+                        config_ciphertext="unused", state=NodeState.ACTIVE, success_checks=2)
+            db.add(node); db.flush()
+            db.add(NodeProbeState(node_id=node.id, stage="passed", static_valid=True, xray_started=True,
+                                  last_success_at=datetime.now(timezone.utc)))
+            db.commit()
+            apply_probe_result(db, node, ProbeResult(False, "internal", False, False, error="control down", failure_class="probe_infrastructure"))
+            self.assertEqual(node.state, NodeState.ACTIVE)
+            self.assertEqual(db.scalar(select(func.count()).select_from(NodeProbeAttempt)), 1)
+            apply_probe_result(db, node, ProbeResult(False, "static", False, False, error="bad config", failure_class="config"))
+            self.assertEqual(node.state, NodeState.QUARANTINED)
+        engine.dispose()
+
+    def test_probe_history_cleanup_removes_only_expired_attempts(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            source = Source(name="test", github_url="https://github.com/a/d", raw_url="https://raw.githubusercontent.com/a/d/main/list")
+            db.add(source); db.flush()
+            node = Node(source_id=source.id, fingerprint="d" * 64, protocol="vless", host="8.8.8.8", port=443, config_ciphertext="unused")
+            db.add(node); db.flush()
+            db.add_all([
+                NodeProbeAttempt(node_id=node.id, stage="passed", failure_class="passed", checked_at=datetime.now(timezone.utc) - timedelta(days=20)),
+                NodeProbeAttempt(node_id=node.id, stage="passed", failure_class="passed", checked_at=datetime.now(timezone.utc)),
+            ])
+            db.commit()
+            self.assertEqual(purge_probe_history(db), 1)
+            self.assertEqual(db.scalar(select(func.count()).select_from(NodeProbeAttempt)), 1)
+        engine.dispose()
+
+    def test_unhealthy_controls_are_removed_and_speed_gate_can_be_skipped(self):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+        class Stream:
+            def __enter__(self):
+                raise httpx.ConnectError("speed unavailable")
+
+            def __exit__(self, *_args):
+                return None
+
+        class Client:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def get(self, url, **_kwargs):
+                if "gstatic" in url:
+                    raise httpx.ConnectError("control unavailable")
+                return Response()
+
+            def stream(self, *_args, **_kwargs):
+                return Stream()
+
+        with patch("app.services.health.httpx.Client", Client):
+            urls, speed_url = _probe_targets()
+        self.assertEqual(len(urls), 2)
+        self.assertIsNone(speed_url)
 
 
 if __name__ == "__main__":

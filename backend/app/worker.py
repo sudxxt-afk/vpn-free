@@ -16,7 +16,7 @@ from app.models import MetricSnapshot, Node, NodeProbeState, NodeState, Source, 
 from app.models import TelegramUser
 from app.services.alerts import notify_admins, should_alert
 from app.services.github import refresh_source
-from app.services.health import check_active_nodes
+from app.services.health import check_active_nodes, purge_probe_history, retry_node_ids, verified_pool_conditions
 from app.services.telegram import has_required_memberships
 from app.services.broadcasts import process_broadcasts
 from app.services.donations import verify_pending_ton_donations
@@ -61,13 +61,7 @@ def refresh_all_sources() -> None:
 def health_check() -> None:
     with SessionLocal() as db:
         ok, total = check_active_nodes(db)
-        fresh_after = datetime.now(timezone.utc) - timedelta(minutes=settings.health_probe_fresh_minutes)
-        verified = (
-            Node.state == NodeState.ACTIVE,
-            NodeProbeState.stage == "passed",
-            NodeProbeState.last_success_at >= fresh_after,
-            Source.is_enabled.is_(True),
-        )
+        verified = verified_pool_conditions()
         active = db.scalar(
             select(func.count()).select_from(Node)
             .join(Source, Source.id == Node.source_id)
@@ -95,6 +89,21 @@ def health_check() -> None:
             asyncio.run(notify_admins(f"Качество пула упало: успешно {ok} из {total} проверок."))
         if previous and previous.active_nodes >= 10 and active < previous.active_nodes * settings.node_drop_alert_ratio and asyncio.run(should_alert("node-drop")):
             asyncio.run(notify_admins(f"Активные ноды резко упали: {previous.active_nodes} → {active}."))
+
+
+def retry_unstable_nodes() -> None:
+    with SessionLocal() as db:
+        node_ids = retry_node_ids(db)
+        if not node_ids:
+            return
+        ok, total = check_active_nodes(db, priority_node_ids=node_ids)
+        logging.info("retry probes successful=%s total=%s", ok, total)
+
+
+def cleanup_probe_history() -> None:
+    with SessionLocal() as db:
+        deleted = purge_probe_history(db)
+        logging.info("probe history cleanup deleted=%s", deleted)
 
 
 def _tls_days_left(hostname: str, port: int) -> int:
@@ -184,6 +193,7 @@ def configure_scheduler(scheduler: BaseScheduler) -> None:
         id="sources",
         max_instances=1,
         coalesce=True,
+        jitter=max(0, settings.source_scheduler_jitter_seconds),
         next_run_time=run_now,
     )
     scheduler.add_job(
@@ -193,8 +203,11 @@ def configure_scheduler(scheduler: BaseScheduler) -> None:
         id="health",
         max_instances=1,
         coalesce=True,
-        next_run_time=run_now,
+        jitter=max(0, settings.health_scheduler_jitter_seconds),
+        next_run_time=run_now + timedelta(minutes=2),
     )
+    scheduler.add_job(retry_unstable_nodes, "interval", seconds=max(60, settings.health_retry_seconds), id="health-retry", max_instances=1, coalesce=True)
+    scheduler.add_job(cleanup_probe_history, "interval", days=1, id="probe-history-cleanup", max_instances=1, coalesce=True)
     scheduler.add_job(revalidate_memberships, "interval", hours=settings.membership_check_hours, id="memberships", max_instances=1, coalesce=True)
     scheduler.add_job(infrastructure_check, "interval", minutes=settings.alert_check_minutes, id="infrastructure", max_instances=1, coalesce=True)
     scheduler.add_job(process_broadcasts, "interval", seconds=5, id="broadcasts", max_instances=1, coalesce=True, next_run_time=run_now)

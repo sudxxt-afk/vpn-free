@@ -14,7 +14,9 @@ SUPPORTED_NETWORKS = {"tcp", "raw", "ws", "grpc", "http", "h2", "xhttp", "splith
 
 
 class ProbeConfigError(ValueError):
-    pass
+    def __init__(self, message: str, failure_class: str = "config") -> None:
+        super().__init__(message)
+        self.failure_class = failure_class
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,7 @@ class ProbeResult:
     latency_ms: float | None = None
     throughput_kbps: float | None = None
     error: str | None = None
+    failure_class: str = "passed"
 
 
 def _decode_b64(value: str) -> bytes:
@@ -57,7 +60,7 @@ def _stream_settings(network: str, security: str, address: str, query: dict[str,
     stream: dict = {"network": network, "security": security or "none"}
     host = _query_value(query, "host")
     path = unquote(_query_value(query, "path", default="/"))
-    header_type = _query_value(query, "headerType", "type", default="none")
+    header_type = _query_value(query, "headerType", default="none")
     if network == "tcp":
         stream["tcpSettings"] = {"header": {"type": header_type}}
     elif network == "ws":
@@ -127,6 +130,8 @@ def _standard_outbound(raw: str, protocol: str) -> dict:
         raise ProbeConfigError(f"{protocol} credential is empty")
     network = _query_value(query, "type", default="tcp")
     security = _query_value(query, "security", default="none").lower()
+    if security in {"false", "0"}:
+        security = "none"
     stream = _stream_settings(network, security, address, query)
     if protocol == "vless":
         try:
@@ -199,7 +204,7 @@ def build_xray_config(raw: str, socks_port: int) -> dict:
     elif protocol == "ss":
         outbound = _shadowsocks_outbound(raw)
     elif protocol in {"hysteria2", "hy2", "tuic"}:
-        raise ProbeConfigError(f"{protocol} is not supported by the pinned Xray probe")
+        raise ProbeConfigError(f"{protocol} is not supported by the pinned Xray probe", "unsupported")
     else:
         raise ProbeConfigError(f"unsupported protocol: {protocol or 'missing'}")
     return {
@@ -241,7 +246,7 @@ def probe_config(
     xray_binary: str,
     urls: tuple[str, ...],
     required_successes: int,
-    speed_url: str,
+    speed_url: str | None,
     min_speed_kbps: float,
     timeout_seconds: float,
 ) -> ProbeResult:
@@ -249,14 +254,14 @@ def probe_config(
     try:
         config = build_xray_config(raw, port)
     except ProbeConfigError as exc:
-        return ProbeResult(False, "static", False, False, error=str(exc))
+        return ProbeResult(False, "static", False, False, error=str(exc), failure_class=exc.failure_class)
 
     process: subprocess.Popen | None = None
     try:
         process = subprocess.Popen(
             [xray_binary, "run", "-c", "stdin:"],
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
@@ -265,9 +270,16 @@ def probe_config(
         process.stdin.close()
         if not _wait_for_socks(port, process, timeout_seconds):
             error = "xray did not start"
-            if process.poll() is not None and process.stderr:
-                error = process.stderr.read().strip()[-500:] or error
-            return ProbeResult(False, "xray", True, False, error=error)
+            if process.poll() is not None:
+                output = "\n".join(filter(None, [
+                    process.stdout.read().strip() if process.stdout else "",
+                    process.stderr.read().strip() if process.stderr else "",
+                ]))[-500:]
+                if output:
+                    error = output
+                failure_class = "config" if any(token in output.lower() for token in ("failed to load config", "failed to build", "invalid", "unknown config")) else "probe_infrastructure"
+                return ProbeResult(False, "xray", failure_class != "config", False, error=error, failure_class=failure_class)
+            return ProbeResult(False, "xray", True, False, error=error, failure_class="probe_infrastructure")
 
         successes = 0
         latencies: list[float] = []
@@ -291,7 +303,13 @@ def probe_config(
                 return ProbeResult(
                     False, "http", True, True, successes, index + 1,
                     round(sum(latencies) / len(latencies), 2) if latencies else None,
-                    error="; ".join(errors)[:500] or "not enough successful HTTP probes",
+                    error="; ".join(errors)[:500] or "not enough successful HTTP probes", failure_class="network",
+                )
+
+            if not speed_url:
+                return ProbeResult(
+                    True, "passed", True, True, successes, len(urls),
+                    round(sum(latencies) / len(latencies), 2), None, None, "passed",
                 )
 
             started = time.perf_counter()
@@ -303,20 +321,21 @@ def probe_config(
             except httpx.HTTPError as exc:
                 return ProbeResult(
                     False, "throughput", True, True, successes, len(urls),
-                    round(sum(latencies) / len(latencies), 2), error=f"speed probe: {type(exc).__name__}",
+                    round(sum(latencies) / len(latencies), 2), error=f"speed probe: {type(exc).__name__}", failure_class="network",
                 )
         if throughput < min_speed_kbps:
             return ProbeResult(
                 False, "throughput", True, True, successes, len(urls),
                 round(sum(latencies) / len(latencies), 2), round(throughput, 2),
                 f"speed {throughput:.0f} Kbit/s below {min_speed_kbps:.0f}",
+                "network",
             )
         return ProbeResult(
             True, "passed", True, True, successes, len(urls),
             round(sum(latencies) / len(latencies), 2), round(throughput, 2), None,
         )
     except (OSError, ValueError) as exc:
-        return ProbeResult(False, "xray", True, False, error=f"{type(exc).__name__}: {exc}"[:500])
+        return ProbeResult(False, "xray", True, False, error=f"{type(exc).__name__}: {exc}"[:500], failure_class="probe_infrastructure")
     finally:
         if process is not None and process.poll() is None:
             process.terminate()

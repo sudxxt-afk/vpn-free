@@ -152,6 +152,21 @@ class NodeProbeState(Base):
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
+class NodeProbeAttempt(Base):
+    """Immutable probe observations used for noisy-network decisions."""
+    __tablename__ = "node_probe_attempts"
+    id: Mapped[uuid.UUID] = uuid_column()
+    node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"), index=True)
+    stage: Mapped[str] = mapped_column(String(32), index=True)
+    failure_class: Mapped[str] = mapped_column(String(32), default="passed", index=True)
+    http_successes: Mapped[int] = mapped_column(Integer, default=0)
+    http_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    throughput_kbps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class RequiredChannel(Base):
     __tablename__ = "required_channels"
     id: Mapped[uuid.UUID] = uuid_column()
