@@ -48,12 +48,18 @@ services:
   api:
     build: ./backend
     env_file: .env
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    command: python -m app.api_supervisor
     ports:
       - "127.0.0.1:8188:8000"
     depends_on:
       - postgres
       - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   worker:
