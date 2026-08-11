@@ -295,6 +295,13 @@ def menu() -> InlineKeyboardMarkup:
     ])
 
 
+def deferred_inventory_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Проверить задания PiarFlow", callback_data="piarflow:check")],
+        *menu().inline_keyboard,
+    ])
+
+
 async def api(method: str, path: str, **kwargs):
     headers = {"X-Internal-Key": settings.internal_api_key}
     async with httpx.AsyncClient(base_url=settings.backend_internal_url, timeout=15) as client:
@@ -465,9 +472,16 @@ async def start(message: Message) -> None:
     if not access.get("allowed"):
         await show_access_gate(message, access)
         return
-    notice = "\n\nСейчас у PiarFlow нет доступных заданий. При следующем /start проверю снова." if access.get("status") == "deferred_no_inventory" else ""
+    if access.get("status") == "deferred_no_inventory":
+        await message.answer(
+            "⚠️ <b>PiarFlow пока не выдал задания</b>\n\n"
+            "Сервис ответил «Sponsors not found». VPN временно доступен без заданий. "
+            "Нажми кнопку ниже или отправь /start позже — я сразу покажу спонсоров, когда они появятся.",
+            reply_markup=deferred_inventory_menu(),
+        )
+        return
     await message.answer(
-        "👋 <b>Добро пожаловать в Zaza VPN</b>\n\nБесплатный VPN с автоматическим выбором сильной ноды для Wi‑Fi и LTE." + notice,
+        "👋 <b>Добро пожаловать в Zaza VPN</b>\n\nБесплатный VPN с автоматическим выбором сильной ноды для Wi‑Fi и LTE.",
         reply_markup=menu(),
     )
 
@@ -998,6 +1012,14 @@ async def check_partner_gate(callback: CallbackQuery) -> None:
     access = await allowed(telegram_id)
     if not access.get("allowed"):
         await show_access_gate(callback, access)
+        return
+    if access.get("status") == "deferred_no_inventory":
+        await edit_callback_screen(
+            callback,
+            "⚠️ <b>Заданий пока нет</b>\n\nPiarFlow снова ответил «Sponsors not found». Доступ остаётся временно открытым; попробуй проверить позже.",
+            reply_markup=deferred_inventory_menu(),
+        )
+        await callback.answer("PiarFlow пока не выдал задания")
         return
     await edit_callback_screen(
         callback,

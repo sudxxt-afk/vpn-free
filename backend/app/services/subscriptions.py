@@ -27,13 +27,9 @@ def happ_retirement_payload(reason: str) -> tuple[str, dict[str, str]]:
         "profile-title": "Zaza VPN - reissue required",
         "profile-update-interval": "1",
     }
-    body = "\n".join((
-        f"#announce: base64:{encoded}",
-        f"#support-url: {BOT_DEEPLINK}",
-        "#profile-title: Zaza VPN - reissue required",
-        "#profile-update-interval: 1",
-    ))
-    return body, headers
+    # An empty body removes cached proxy rows. HAPP treats metadata-only body
+    # lines as proxy configs on some builds, so all notices stay in headers.
+    return "", headers
 
 
 def retire_user_devices(db: Session, user_id: UUID, reason: str, batch_id: UUID | None = None) -> int:

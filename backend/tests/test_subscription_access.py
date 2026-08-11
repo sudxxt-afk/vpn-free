@@ -68,7 +68,7 @@ class SubscriptionAccessTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers["support-url"], "https://t.me/zazaaVPN_bot?start=reissue")
             self.assertTrue(response.headers["announce"].startswith("base64:"))
-            self.assertNotIn("vless://", response.body.decode())
+            self.assertEqual(response.body, b"")
 
     def test_unknown_subscription_stays_not_found(self):
         with self.Session() as db, self.assertRaises(HTTPException) as raised:

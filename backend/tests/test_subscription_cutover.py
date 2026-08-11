@@ -42,7 +42,7 @@ class SubscriptionCutoverTests(unittest.TestCase):
 
     def test_unsubscribe_happ_payload_contains_distinct_message(self):
         body, headers = happ_retirement_payload("sponsor_unsubscribed")
-        self.assertIn("#announce: base64:", body)
+        self.assertEqual(body, "")
         self.assertEqual(headers["support-url"], "https://t.me/zazaaVPN_bot?start=reissue")
         self.assertLessEqual(len(SPONSOR_UNSUBSCRIBED_MESSAGE), 200)
 
