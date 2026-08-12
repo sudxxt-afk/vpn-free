@@ -19,11 +19,11 @@ type Node = { id: string; protocol: string; host: string; port: number; state: "
 type ProbeAttempt = { stage: string; failure_class: string; http_successes: number; http_attempts: number; latency_ms: number | null; throughput_kbps: number | null; error: string | null; checked_at: string };
 type Channel = { id: string; chat_id: number; title: string; username: string | null; is_active: boolean };
 type PoolPolicy = { vless_reality_limit: number; vless_ws_limit: number; vless_other_limit: number; hysteria2_limit: number; tuic_limit: number; trojan_limit: number; shadowsocks_limit: number; vmess_limit: number; updated_at: string | null };
-type AnalyticsDay = { date: string; bot_starts: number; site_visits: number; happ_launches: number; vpn_issued: number; subscription_opens: number };
+type AnalyticsDay = { date: string; bot_starts: number; site_visits: number; happ_launches: number; link_copies: number; setup_confirmed: number; vpn_issued: number; subscription_opens: number };
 type AnalyticsCohort = { date: string; users: number; d0: number | null; d1: number | null; d3: number | null; d7: number | null };
 type PiarFlowDay = { date: string; sold_subs: number; earned: number };
 type PiarFlowAnalytics = { enabled: boolean; provider_active: boolean | null; username: string | null; max_sponsors: number; reset_time: number; sold_subs: number; not_counted: number; earned: number; last_synced_at: string | null; last_error: string | null; barrier_users: number; task_users: number; check_users: number; completed_users: number; pending_users: number; deferred_users: number; unsubscribed_users: number; check_attempts: number; average_checks_to_complete: number; api_errors: number; no_inventory: number; unsubscribe_events: number; revoked_devices: number; check_conversion: number; completion_conversion: number; days: PiarFlowDay[] };
-type Analytics = { total_bot_users: number; new_bot_users: number; known_bot_blocks: number; active_users_1d: number; active_users_7d: number; active_users_30d: number; active_devices: number; funnel_bot_users: number; funnel_vpn_users: number; funnel_site_users: number; funnel_happ_users: number; funnel_subscription_users: number; bot_starts: number; unique_site_visitors: number; happ_launches: number; vpn_issued: number; subscription_opens: number; donation_opens: number; donation_supporters: number; donation_stars_count: number; donation_stars_total: number; donation_ton_count: number; donation_ton_total: number; days: AnalyticsDay[]; cohorts: AnalyticsCohort[]; piarflow: PiarFlowAnalytics };
+type Analytics = { total_bot_users: number; new_bot_users: number; known_bot_blocks: number; active_users_1d: number; active_users_7d: number; active_users_30d: number; active_devices: number; funnel_bot_users: number; funnel_vpn_users: number; funnel_site_users: number; funnel_happ_users: number; funnel_subscription_users: number; bot_starts: number; unique_site_visitors: number; happ_launches: number; link_copies: number; setup_confirmed: number; vpn_issued: number; subscription_opens: number; donation_opens: number; donation_supporters: number; donation_stars_count: number; donation_stars_total: number; donation_ton_count: number; donation_ton_total: number; days: AnalyticsDay[]; cohorts: AnalyticsCohort[]; piarflow: PiarFlowAnalytics };
 type CurrentAdmin = { login: string; role: "owner" | "admin" | "viewer" };
 type Administrator = { id: string; login: string; role: "owner" | "admin" | "viewer"; is_active: boolean; telegram_id: number | null; telegram_username: string | null; support_enabled: boolean };
 
@@ -151,6 +151,8 @@ function AnalyticsPage({ analytics }: { analytics: Analytics | null }) {
     ["Заблокировали бота", analytics.known_bot_blocks, "подтверждено Telegram при отправке", CircleAlert, "amber"],
     ["Переходы на сайт", analytics.unique_site_visitors, "уникальные устройства за 14 дней", Activity, "blue"],
     ["Открытия HAPP", analytics.happ_launches, "нажатия «Открыть HAPP»", ArrowUpRight, "mint"],
+    ["Копирования ссылки", analytics.link_copies, "ручной импорт подписки", Link2, "blue"],
+    ["Подтвердили настройку", analytics.setup_confirmed, "самостоятельное подтверждение", Check, "mint"],
     ["Выдано VPN", analytics.vpn_issued, "новые и перевыпущенные ссылки", ShieldCheck, "amber"],
   ] as const;
   const max = Math.max(...analytics.days.map((item) => item.bot_starts + item.site_visits + item.happ_launches), 1);

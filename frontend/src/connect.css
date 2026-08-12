@@ -1,4 +1,6 @@
 :root { color-scheme: dark; }
+.zaza-confirm { grid-column: 2 / -1; justify-self: start; padding: 11px 14px; border: 1px solid #526526; color: #dce7bd; background: #0c0e07; font: 900 11px/1 Impact, sans-serif; letter-spacing: .07em; cursor: pointer; }.zaza-confirm:disabled { color: #0a0c05; border-color: #b6e62b; background: #b6e62b; cursor: default; }
+@media (max-width: 920px) { .zaza-confirm { grid-column: auto; } }
 * { box-sizing: border-box; }
 .zaza-page { min-height: 100vh; color: #f1eee0; background: #080a06; font-family: Inter, Arial, sans-serif; overflow: hidden; }
 .zaza-hero-art { position: relative; min-height: min(720px, 78vh); background-position: center; background-size: cover; isolation: isolate; }

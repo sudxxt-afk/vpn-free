@@ -17,22 +17,21 @@ from aiogram.utils.text_decorations import html_decoration
 
 from app.config import get_settings
 from app.services.broadcast_drafts import BroadcastDraftStore
+from app.services.interaction_state import InteractionStateStore
 from app.services.telegram_html import sanitize_telegram_html
 
 logging.basicConfig(level=logging.INFO)
 settings = get_settings()
 dp = Dispatcher()
-support_waiting: set[int] = set()
 admin_reply_waiting: dict[int, str] = {}
 admin_user_search_waiting: set[int] = set()
-donation_custom_waiting: set[int] = set()
 broadcast_drafts = BroadcastDraftStore()
+interaction_states = InteractionStateStore()
 
 
 async def clear_interactive_state(telegram_id: int, *, keep_broadcast: bool = False) -> None:
     """Do not let an abandoned flow capture input for a new one."""
-    support_waiting.discard(telegram_id)
-    donation_custom_waiting.discard(telegram_id)
+    await interaction_states.clear(telegram_id)
     admin_reply_waiting.pop(telegram_id, None)
     admin_user_search_waiting.discard(telegram_id)
     if not keep_broadcast:
@@ -270,6 +269,16 @@ async def show_broadcast_preview(target: Message | CallbackQuery, draft: dict) -
 @dp.error()
 async def record_telegram_block(event: ErrorEvent) -> bool:
     """Telegram does not provide a list of blockers; record a confirmed send failure."""
+    if isinstance(event.exception, BotServiceUnavailable):
+        origin = event.update.message or event.update.callback_query
+        try:
+            if isinstance(origin, CallbackQuery):
+                await origin.answer(str(event.exception), show_alert=True)
+            elif origin:
+                await origin.answer(str(event.exception), reply_markup=menu())
+        except Exception:
+            logging.exception("Unable to show temporary API outage")
+        return True
     if not isinstance(event.exception, TelegramForbiddenError):
         logging.error(
             "Unhandled Telegram update",
@@ -289,8 +298,9 @@ async def record_telegram_block(event: ErrorEvent) -> bool:
 
 def menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📥 Получить VPN", callback_data="vpn:get")],
-        [InlineKeyboardButton(text="📘 Инструкция", callback_data="vpn:help"), InlineKeyboardButton(text="🛟 Поддержка", callback_data="vpn:support")],
+        [InlineKeyboardButton(text="📱 Мои устройства", callback_data="vpn:get")],
+        [InlineKeyboardButton(text="📊 Проверить VPN", callback_data="vpn:status"), InlineKeyboardButton(text="📘 Инструкция", callback_data="vpn:help")],
+        [InlineKeyboardButton(text="🛟 Поддержка", callback_data="vpn:support")],
         [InlineKeyboardButton(text="❤️ Поддержать проект", callback_data="donate:home")],
     ])
 
@@ -302,10 +312,27 @@ def deferred_inventory_menu() -> InlineKeyboardMarkup:
     ])
 
 
+class BotServiceUnavailable(RuntimeError):
+    pass
+
+
 async def api(method: str, path: str, **kwargs):
     headers = {"X-Internal-Key": settings.internal_api_key}
-    async with httpx.AsyncClient(base_url=settings.backend_internal_url, timeout=15) as client:
-        response = await client.request(method, path, headers=headers, **kwargs)
+    attempts = 2 if method.upper() == "GET" else 1
+    response = None
+    for attempt in range(attempts):
+        try:
+            async with httpx.AsyncClient(base_url=settings.backend_internal_url, timeout=httpx.Timeout(10, connect=3)) as client:
+                response = await client.request(method, path, headers=headers, **kwargs)
+            if response.status_code not in {502, 503, 504} or attempt + 1 == attempts:
+                break
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            if attempt + 1 == attempts:
+                raise BotServiceUnavailable("Сервис VPN перезапускается. Попробуйте ещё раз через 10 секунд.") from exc
+        await asyncio.sleep(0.4)
+    assert response is not None
+    if response.status_code in {502, 503, 504}:
+        raise BotServiceUnavailable("Сервис VPN перезапускается. Попробуйте ещё раз через 10 секунд.")
     if response.status_code >= 400:
         try:
             detail = response.json().get("detail", "Сервис временно недоступен")
@@ -472,6 +499,17 @@ async def start(message: Message) -> None:
     if not access.get("allowed"):
         await show_access_gate(message, access)
         return
+    vpn_status = await api("GET", f"/internal/users/{telegram_id}/vpn-status")
+    if vpn_status.get("can_restore"):
+        restore_markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="♻️ Перевыпустить отключённую подписку", callback_data="vpn:restore")],
+            *menu().inline_keyboard,
+        ])
+        await message.answer(
+            "⚠️ <b>Старая подписка отключена</b>\n\nНажми кнопку ниже: я создам новое основное устройство и сразу выдам рабочую ссылку для HAPP.",
+            reply_markup=restore_markup,
+        )
+        return
     if access.get("status") == "deferred_no_inventory":
         await message.answer(
             "⚠️ <b>PiarFlow пока не выдал задания</b>\n\n"
@@ -503,7 +541,7 @@ async def terms_command(message: Message) -> None:
 @dp.message(Command("paysupport"))
 async def payment_support_command(message: Message) -> None:
     telegram_id = await ensure_user(message)
-    support_waiting.add(telegram_id)
+    await interaction_states.set(telegram_id, "support", category="payment")
     await message.answer("Опишите проблему с платежом одним сообщением. Укажите сумму и примерное время, но не присылайте данные кошелька или банковской карты.")
 
 
@@ -523,7 +561,7 @@ async def donation_stars_callback(callback: CallbackQuery) -> None:
     telegram_id = await ensure_user(callback)
     value = callback.data.rsplit(":", 1)[-1]
     if value == "custom":
-        donation_custom_waiting.add(telegram_id)
+        await interaction_states.set(telegram_id, "donation_custom")
         await edit_callback_screen(callback, "Введите сумму от 1 до 10 000 Stars одним числом. Для отмены отправьте /cancel.")
         await callback.answer()
         return
@@ -977,27 +1015,109 @@ async def admin_broadcast_confirm(callback: CallbackQuery) -> None:
         await callback.answer(str(exc), show_alert=True)
 
 
+async def show_devices(callback: CallbackQuery) -> None:
+    telegram_id = await ensure_user(callback)
+    devices = await api("GET", f"/internal/users/{telegram_id}/devices")
+    status = await api("GET", f"/internal/users/{telegram_id}/vpn-status")
+    rows = [[InlineKeyboardButton(
+        text=f"{item['slot']}. {item['label']} · {'использовалось' if item.get('last_used_at') else 'не подключено'}",
+        callback_data=f"vpn:device:{item['id']}",
+    )] for item in devices]
+    if len(devices) < 8:
+        rows.append([InlineKeyboardButton(text="➕ Добавить устройство", callback_data="vpn:add")])
+    if status.get("can_restore"):
+        rows.append([InlineKeyboardButton(text="♻️ Восстановить VPN", callback_data="vpn:restore")])
+    rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="vpn:home")])
+    last_open = status.get("last_subscription_open")
+    await edit_callback_screen(
+        callback,
+        f"📱 <b>Мои устройства: {len(devices)}/8</b>\n\n"
+        f"Последнее обновление в HAPP: <b>{last_open[:16].replace('T', ' ') if last_open else 'ещё не было'}</b>.\n"
+        "Открой устройство, чтобы переименовать, удалить или безопасно перевыпустить ссылку.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "vpn:get")
 async def access_flow(callback: CallbackQuery) -> None:
+    await show_devices(callback)
+
+
+@dp.callback_query(F.data == "vpn:home")
+async def vpn_home(callback: CallbackQuery) -> None:
+    await edit_callback_screen(callback, "Главное меню", reply_markup=menu())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.in_({"vpn:add", "vpn:restore"}))
+async def add_device(callback: CallbackQuery) -> None:
     telegram_id = await ensure_user(callback)
     devices = await api("GET", f"/internal/users/{telegram_id}/devices")
     if len(devices) >= 8:
-        buttons = [[InlineKeyboardButton(text=f"♻️ Перевыпустить: {item['label']}", callback_data=f"vpn:rotate:{item['id']}")] for item in devices]
-        await edit_callback_screen(
-            callback,
-            "У вас уже 8 устройств. Выберите устройство для перевыпуска ссылки:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        )
-        await callback.answer()
+        await callback.answer("Достигнут лимит 8 устройств", show_alert=True)
         return
-    target_devices = len(devices) + 1
-    access = await access_status(telegram_id)
-    if not access["allowed"]:
-        await show_access_gate(callback, access)
-        return
-    device = await api("POST", f"/internal/users/{telegram_id}/devices", json={"label": f"Устройство {len(devices) + 1}"})
+    label = "Основное устройство" if callback.data == "vpn:restore" else f"Устройство {len(devices) + 1}"
+    device = await api("POST", f"/internal/users/{telegram_id}/devices", json={"label": label})
     await send_subscription(callback, device)
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("vpn:device:"))
+async def device_details(callback: CallbackQuery) -> None:
+    telegram_id = await ensure_user(callback)
+    device_id = callback.data.rsplit(":", 1)[1]
+    devices = await api("GET", f"/internal/users/{telegram_id}/devices")
+    device = next((item for item in devices if item["id"] == device_id), None)
+    if not device:
+        await callback.answer("Устройство уже удалено", show_alert=True)
+        await show_devices(callback)
+        return
+    last_used = device.get("last_used_at")
+    rows = [
+        [InlineKeyboardButton(text="✏️ Переименовать", callback_data=f"vpn:rename:{device_id}"),
+         InlineKeyboardButton(text="♻️ Перевыпустить", callback_data=f"vpn:rotate:{device_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"vpn:delete-confirm:{device_id}")],
+        [InlineKeyboardButton(text="⬅️ К устройствам", callback_data="vpn:get")],
+    ]
+    await edit_callback_screen(
+        callback,
+        f"📱 <b>{escape(device['label'])}</b>\n\nСлот: {device['slot']} из 8\n"
+        f"Создано: {(device.get('created_at') or '')[:10] or '—'}\n"
+        f"Последнее обновление HAPP: {(last_used or '')[:16].replace('T', ' ') or 'ещё не было'}\n"
+        f"Ключ: …{device['token_hint']}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("vpn:rename:"))
+async def rename_device_prompt(callback: CallbackQuery) -> None:
+    assert callback.from_user
+    device_id = callback.data.rsplit(":", 1)[1]
+    await interaction_states.set(callback.from_user.id, "rename_device", device_id=device_id)
+    await edit_callback_screen(callback, "Отправь новое название устройства одним сообщением (до 80 символов). Для отмены: /cancel")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("vpn:delete-confirm:"))
+async def delete_device_confirm(callback: CallbackQuery) -> None:
+    device_id = callback.data.rsplit(":", 1)[1]
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Удалить устройство", callback_data=f"vpn:delete:{device_id}")],
+        [InlineKeyboardButton(text="Отмена", callback_data=f"vpn:device:{device_id}")],
+    ])
+    await edit_callback_screen(callback, "Удалить устройство? Его текущая ссылка перестанет работать, восстановить её будет нельзя.", reply_markup=markup)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("vpn:delete:"))
+async def delete_device(callback: CallbackQuery) -> None:
+    telegram_id = await ensure_user(callback)
+    device_id = callback.data.rsplit(":", 1)[1]
+    await api("DELETE", f"/internal/users/{telegram_id}/devices/{device_id}")
+    await callback.answer("Устройство удалено")
+    await show_devices(callback)
 
 
 @dp.callback_query(F.data.in_({"vpn:refresh", "vpn:check"}))
@@ -1085,9 +1205,21 @@ async def qr_callback(callback: CallbackQuery) -> None:
 
 @dp.callback_query(F.data == "vpn:status")
 async def status_callback(callback: CallbackQuery) -> None:
-    info = await api("GET", "/internal/status")
+    telegram_id = await ensure_user(callback)
+    info = await api("GET", f"/internal/users/{telegram_id}/vpn-status")
     ping = f"{info['average_ping']} мс" if info.get("average_ping") is not None else "ещё измеряется"
-    await edit_callback_screen(callback, f"Активных нод: {info['active_nodes']}\nСредний ping: {ping}", reply_markup=menu())
+    last_open = info.get("last_subscription_open")
+    await edit_callback_screen(
+        callback,
+        "📊 <b>Диагностика Zaza VPN</b>\n\n"
+        f"Сеть: <b>{info['active_nodes']} активных серверов</b>\n"
+        f"Средний ping: <b>{ping}</b>\n"
+        f"Устройства: <b>{info['active_devices']}/{info['device_limit']}</b>\n"
+        f"Последнее обновление HAPP: <b>{last_open[:16].replace('T', ' ') if last_open else 'не зафиксировано'}</b>\n"
+        f"Доступ: <b>{info['access_status']}</b>\n\n"
+        "Если HAPP не подключается, сначала обнови подписку в приложении. Если дата выше не изменится, открой поддержку.",
+        reply_markup=menu(),
+    )
     await callback.answer()
 
 
@@ -1095,11 +1227,30 @@ async def status_callback(callback: CallbackQuery) -> None:
 async def support_callback(callback: CallbackQuery) -> None:
     assert callback.from_user
     await ensure_user(callback)
-    support_waiting.add(callback.from_user.id)
+    categories = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔌 Не подключается", callback_data="support:category:connection"),
+         InlineKeyboardButton(text="📱 Ошибка HAPP", callback_data="support:category:happ")],
+        [InlineKeyboardButton(text="🐢 Низкая скорость", callback_data="support:category:speed"),
+         InlineKeyboardButton(text="💳 Платёж", callback_data="support:category:payment")],
+        [InlineKeyboardButton(text="Другое", callback_data="support:category:other")],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="vpn:home")],
+    ])
     await edit_callback_screen(
         callback,
-        "Опишите проблему одним сообщением: укажите клиент, устройство и что именно не работает. Я передам обращение администратору.",
-        reply_markup=menu(),
+        "🛟 <b>Поддержка</b>\n\nВыбери тип проблемы. После этого можно отправить текст или скриншот с подписью.",
+        reply_markup=categories,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("support:category:"))
+async def support_category(callback: CallbackQuery) -> None:
+    assert callback.from_user
+    category = callback.data.rsplit(":", 1)[1]
+    await interaction_states.set(callback.from_user.id, "support", category=category)
+    await edit_callback_screen(
+        callback,
+        "Опиши проблему одним сообщением. Можно приложить скриншот и подпись. Бот автоматически добавит диагностику VPN и данные устройства.\n\nДля отмены: /cancel",
     )
     await callback.answer()
 
@@ -1115,7 +1266,8 @@ async def state_message(message: Message) -> None:
         await message.answer("Действие отменено.", reply_markup=menu())
         return
 
-    if telegram_id in donation_custom_waiting:
+    interaction = await interaction_states.get(telegram_id)
+    if interaction and interaction.get("kind") == "donation_custom":
         if not message.text or not message.text.strip().isdigit():
             await message.answer("Введите целое число от 1 до 10 000 или отправьте /cancel.")
             return
@@ -1123,12 +1275,22 @@ async def state_message(message: Message) -> None:
         if not 1 <= amount <= 10000:
             await message.answer("Сумма должна быть от 1 до 10 000 Stars.")
             return
-        donation_custom_waiting.discard(telegram_id)
+        await interaction_states.clear(telegram_id)
         try:
             await send_star_invoice(message, telegram_id, amount)
         except Exception as exc:
-            donation_custom_waiting.add(telegram_id)
+            await interaction_states.set(telegram_id, "donation_custom")
             await message.answer(f"Не удалось создать счёт: {escape(str(exc))}")
+        return
+
+    if interaction and interaction.get("kind") == "rename_device":
+        label = (message.text or "").strip()
+        if not label or len(label) > 80:
+            await message.answer("Название должно содержать от 1 до 80 символов или отправь /cancel.")
+            return
+        await api("PATCH", f"/internal/users/{telegram_id}/devices/{interaction['device_id']}", json={"label": label})
+        await interaction_states.clear(telegram_id)
+        await message.answer(f"✅ Устройство переименовано: <b>{escape(label)}</b>", reply_markup=menu())
         return
 
     if telegram_id in admin_reply_waiting:
@@ -1248,18 +1410,32 @@ async def state_message(message: Message) -> None:
         await show_broadcast_preview(message, broadcast_state["draft"])
         return
 
-    if telegram_id not in support_waiting:
+    if not interaction or interaction.get("kind") != "support":
         return
-    if not message.text:
-        await message.answer("Обращение должно быть текстовым.")
+    text = (message.text or message.caption or "").strip()
+    if not text:
+        await message.answer("Добавь описание проблемы к скриншоту или отправь текстом.")
         return
-    support_waiting.discard(telegram_id)
     try:
-        ticket = await api("POST", f"/internal/users/{telegram_id}/tickets", json={"text": message.text})
+        diagnostics = await api("GET", f"/internal/users/{telegram_id}/vpn-status")
+        photo_file_id = message.photo[-1].file_id if message.photo else None
+        metadata = (
+            f"\n\n---\nДиагностика: устройства {diagnostics['active_devices']}/{diagnostics['device_limit']}, "
+            f"ноды {diagnostics['active_nodes']}, ping {diagnostics.get('average_ping') or '—'} мс, "
+            f"доступ {diagnostics['access_status']}, язык {message.from_user.language_code or '—'}"
+        )
+        ticket = await api("POST", f"/internal/users/{telegram_id}/tickets", json={
+            "text": text + metadata,
+            "category": interaction.get("category", "other"),
+            "telegram_file_id": photo_file_id,
+        })
+        await interaction_states.clear(telegram_id)
         bot = message.bot
         if bot:
             for admin_id in ticket.pop("admin_ids", []):
                 try:
+                    if photo_file_id:
+                        await bot.send_photo(admin_id, photo_file_id, caption=f"Скриншот к обращению <code>{ticket['id'][:8]}</code>")
                     await bot.send_message(admin_id, ticket_text(ticket), reply_markup=ticket_keyboard(ticket["id"], ticket["status"]))
                 except Exception:
                     logging.exception("Unable to forward support ticket to %s", admin_id)
@@ -1277,6 +1453,7 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         await broadcast_drafts.close()
+        await interaction_states.close()
 
 
 if __name__ == "__main__":

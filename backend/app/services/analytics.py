@@ -4,7 +4,7 @@ from uuid import UUID
 
 
 FUNNEL_EVENTS = ("bot_start", "vpn_issued", "site_visit", "happ_launch", "subscription_open")
-ACTIVE_EVENTS = set(FUNNEL_EVENTS)
+ACTIVE_EVENTS = set(FUNNEL_EVENTS) | {"link_copy", "setup_confirmed", "device_rotated", "device_deleted"}
 
 
 def sequential_funnel(events, start: datetime) -> dict[str, int]:

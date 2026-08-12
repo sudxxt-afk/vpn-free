@@ -8,9 +8,9 @@ from sqlalchemy.orm import sessionmaker
 from fastapi import HTTPException
 
 from app.database import Base
-from app.main import piarflow_webhook, subscription
+from app.main import bot_delete_device, bot_rename_device, bot_rotate_device, bot_vpn_status, piarflow_webhook, subscription
 from app.models import Device, PiarFlowAccessState, PiarFlowBotSnapshot, RetiredSubscription, TelegramUser
-from app.schemas import PiarFlowWebhookPayload
+from app.schemas import DeviceUpdate, PiarFlowWebhookPayload
 from app.security import hash_token
 from app.services.piarflow import PartnerDecision
 
@@ -74,6 +74,34 @@ class SubscriptionAccessTests(unittest.TestCase):
         with self.Session() as db, self.assertRaises(HTTPException) as raised:
             asyncio.run(subscription("unknown-device-token", db))
         self.assertEqual(raised.exception.status_code, 404)
+
+    def test_device_management_and_restore_status(self):
+        with self.Session() as db:
+            user = TelegramUser(telegram_id=1100, username="devices")
+            db.add(user); db.flush()
+            db.add(PiarFlowAccessState(user_id=user.id, status="completed"))
+            old = RetiredSubscription(
+                original_device_id=user.id, user_id=user.id, slot=1, label="Old phone",
+                token_hash=hash_token("old-device"), token_hint="old", reason="global_reissue",
+            )
+            db.add(old); db.commit()
+
+            empty = bot_vpn_status(1100, db)
+            self.assertTrue(empty["can_restore"])
+            device = Device(user_id=user.id, slot=1, label="Phone", token_hash=hash_token("live-device"), token_hint="live")
+            db.add(device); db.commit(); db.refresh(device)
+            renamed = bot_rename_device(1100, device.id, DeviceUpdate(label="Laptop"), db)
+            self.assertEqual(renamed.label, "Laptop")
+
+            rotated = bot_rotate_device(1100, device.id, db)
+            self.assertIsNotNone(rotated.subscription_url)
+            self.assertEqual(db.query(RetiredSubscription).count(), 2)
+            self.assertFalse(bot_vpn_status(1100, db)["can_restore"])
+
+            result = bot_delete_device(1100, device.id, db)
+            self.assertTrue(result["deleted"])
+            self.assertTrue(bot_vpn_status(1100, db)["can_restore"])
+            self.assertEqual(db.query(Device).count(), 0)
 
     def test_webhook_test_is_side_effect_free_and_unsubscribe_revokes(self):
         with self.Session() as db, patch("app.main.settings", SimpleNamespace(piarflow_webhook_secret="secret")):

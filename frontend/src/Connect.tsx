@@ -36,6 +36,7 @@ async function copyText(value: string) {
 
 export function Connect() {
   const [copied, setCopied] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
   const [platform, setPlatform] = useState<Platform>(detectPlatform);
   const token = new URLSearchParams(window.location.search).get("token") || "";
   // VITE_API_URL is deliberately relative (/api) in production so browser API
@@ -48,7 +49,7 @@ export function Connect() {
   const happLink = useMemo(() => subscription ? `happ://add/${subscription}` : "", [subscription]);
   const platformLabel = platform === "other" ? "вашего устройства" : platformNames[platform];
 
-  const track = (eventType: "site_visit" | "happ_launch") => {
+  const track = (eventType: "site_visit" | "link_copy" | "happ_launch" | "setup_confirmed") => {
     if (!token) return;
     void fetch(`${apiBase}/events/landing`, {
       method: "POST",
@@ -62,6 +63,7 @@ export function Connect() {
   const copy = async () => {
     if (!subscription) return;
     await copyText(subscription);
+    track("link_copy");
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2200);
   };
@@ -71,6 +73,11 @@ export function Connect() {
     track("happ_launch");
     void copy();
     window.location.href = happLink;
+  };
+
+  const confirmSetup = () => {
+    track("setup_confirmed");
+    setConfirmed(true);
   };
 
   if (!token) return <main className="zaza-page zaza-error-page"><section><span className="zaza-mini-logo">Z</span><h1>Ссылка неполная</h1><p>Вернитесь в Telegram-бот и ещё раз нажмите «Получить VPN».</p><a href="https://t.me/zazaaVPN_bot">Открыть Zaza VPN в Telegram</a></section></main>;
@@ -86,6 +93,7 @@ export function Connect() {
       <div className="zaza-os-block"><span>ТВОЁ УСТРОЙСТВО</span><div className="zaza-os-switch">{(["android", "ios", "desktop"] as Exclude<Platform, "other">[]).map(item => <button key={item} className={platform === item ? "active" : ""} onClick={() => setPlatform(item)}>{item === "android" ? "🤖 Android" : item === "ios" ? "🍏 iPhone" : "💻 Компьютер"}</button>)}</div><small>Выбрано: {platformLabel}</small></div>
       <div className="zaza-import-actions"><button className="zaza-open-happ" onClick={launchHapp}>🚀 ОТКРЫТЬ HAPP И ДОБАВИТЬ</button><button className="zaza-copy-link" onClick={copy}>{copied ? "✓ ССЫЛКА СКОПИРОВАНА" : "▣ СКОПИРОВАТЬ ССЫЛКУ"}</button></div>
       <p className="zaza-explainer">Нажатие откроет HAPP и передаст туда твою личную подписку. Если HAPP ещё не установлен — сначала скачай его, затем вернись сюда и нажми кнопку снова.</p>
+      <button className="zaza-confirm" onClick={confirmSetup} disabled={confirmed}>{confirmed ? "✓ НАСТРОЙКА ПОДТВЕРЖДЕНА" : "✓ Я ДОБАВИЛ ПОДПИСКУ В HAPP"}</button>
       <a className="zaza-download" href="https://t.me/zazaaVPN_bot" target="_blank" rel="noreferrer">✈️ ОТКРЫТЬ ZAZA VPN В TELEGRAM</a>
       <a className="zaza-download" href="https://www.happ.uno/" target="_blank" rel="noreferrer">↓ СКАЧАТЬ HAPP ДЛЯ {platformLabel.toUpperCase()}</a>
     </section>

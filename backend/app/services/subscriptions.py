@@ -52,6 +52,27 @@ def retire_user_devices(db: Session, user_id: UUID, reason: str, batch_id: UUID 
     return len(devices)
 
 
+def retire_device(db: Session, device: Device, reason: str) -> None:
+    archive_device_token(db, device, reason)
+    db.delete(device)
+    db.flush()
+
+
+def archive_device_token(db: Session, device: Device, reason: str) -> None:
+    db.add(RetiredSubscription(
+        original_device_id=device.id,
+        user_id=device.user_id,
+        slot=device.slot,
+        label=device.label,
+        token_hash=device.token_hash,
+        token_hint=device.token_hint,
+        reason=reason,
+        original_created_at=device.created_at,
+        original_last_used_at=device.last_used_at,
+    ))
+    db.flush()
+
+
 def run_global_cutover(db: Session, cutover_key: str = "piarflow-onboarding-v1") -> SubscriptionCutover:
     existing = db.scalar(select(SubscriptionCutover).where(SubscriptionCutover.cutover_key == cutover_key))
     if existing:

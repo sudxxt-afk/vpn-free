@@ -20,7 +20,7 @@ from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, 
                         PiarFlowDailyStat, PiarFlowEvent, PoolPolicy, RequiredChannel, RetiredSubscription, Role, Source,
                         SourceQuality, SourceRun, SupportMessage, SupportTicket, TelegramUser)
 from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLookup, BotUserRequest, BroadcastCreate, ChannelCreate, ChannelResponse, DashboardResponse,
-                         DeviceCreate, DeviceResponse, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
+                         DeviceCreate, DeviceResponse, DeviceUpdate, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
                          AnalyticsCohortResponse, AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
                          NodeProbeAttemptResponse, NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, StarDonationComplete,
                          StarDonationIntent, StarDonationPreCheckout, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare,
@@ -37,7 +37,7 @@ from app.services.analytics import daily_retention_cohorts, sequential_funnel
 from app.services.donations import (DonationError, complete_star_donation, create_star_donation, create_ton_session,
                                     donation_analytics, donation_by_public_token, donation_summary, prepare_ton_donation,
                                     public_ton_payload, validate_star_checkout, verify_pending_ton_donations)
-from app.services.subscriptions import happ_retirement_payload
+from app.services.subscriptions import archive_device_token, happ_retirement_payload, retire_device
 
 settings = get_settings()
 
@@ -162,7 +162,9 @@ def source_response(source: Source, quality: SourceQuality | None = None) -> Sou
 
 def device_response(device: Device, include_url: bool = False, plain_token: str | None = None) -> DeviceResponse:
     url = f"{settings.public_base_url}/s/{plain_token}" if include_url and plain_token else None
-    return DeviceResponse(id=device.id, slot=device.slot, label=device.label, token_hint=device.token_hint, is_revoked=device.is_revoked, subscription_url=url)
+    return DeviceResponse(id=device.id, slot=device.slot, label=device.label, token_hint=device.token_hint,
+                          is_revoked=device.is_revoked, created_at=device.created_at,
+                          last_used_at=device.last_used_at, subscription_url=url)
 
 
 def node_response(node: Node, source: Source | None = None, probe: NodeProbeState | None = None) -> NodeResponse:
@@ -302,8 +304,8 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
     start = now - timedelta(days=days - 1)
     events_from = min(start, now - timedelta(days=30))
     events = db.scalars(select(AnalyticsEvent).where(AnalyticsEvent.created_at >= events_from).order_by(AnalyticsEvent.created_at)).all()
-    points = {str((start + timedelta(days=offset)).date()): {"bot_starts": 0, "site_visits": 0, "happ_launches": 0, "vpn_issued": 0, "subscription_opens": 0} for offset in range(days)}
-    event_fields = {"bot_start": "bot_starts", "site_visit": "site_visits", "happ_launch": "happ_launches", "vpn_issued": "vpn_issued", "subscription_open": "subscription_opens"}
+    points = {str((start + timedelta(days=offset)).date()): {"bot_starts": 0, "site_visits": 0, "happ_launches": 0, "link_copies": 0, "setup_confirmed": 0, "vpn_issued": 0, "subscription_opens": 0} for offset in range(days)}
+    event_fields = {"bot_start": "bot_starts", "site_visit": "site_visits", "link_copy": "link_copies", "happ_launch": "happ_launches", "setup_confirmed": "setup_confirmed", "vpn_issued": "vpn_issued", "subscription_open": "subscription_opens"}
     for event in events:
         key = str(event.created_at.date())
         field = event_fields.get(event.event_type)
@@ -312,7 +314,7 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
     count = lambda name: sum(1 for event in events if event.created_at >= start and event.event_type == name)
     def unique_users(event_types: set[str], since: datetime) -> int:
         return len({event.telegram_user_id for event in events if event.created_at >= since and event.event_type in event_types and event.telegram_user_id is not None})
-    active_types = {"bot_start", "site_visit", "happ_launch", "vpn_issued", "subscription_open"}
+    active_types = {"bot_start", "site_visit", "link_copy", "happ_launch", "setup_confirmed", "vpn_issued", "subscription_open"}
     funnel = sequential_funnel(events, start)
     first_starts = db.execute(
         select(AnalyticsEvent.telegram_user_id, func.min(AnalyticsEvent.created_at))
@@ -387,6 +389,8 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
         bot_starts=count("bot_start"),
         unique_site_visitors=len({event.device_id for event in events if event.event_type == "site_visit" and event.device_id is not None}),
         happ_launches=count("happ_launch"),
+        link_copies=count("link_copy"),
+        setup_confirmed=count("setup_confirmed"),
         vpn_issued=count("vpn_issued"),
         subscription_opens=count("subscription_open"),
         donation_opens=count("donation_open"),
@@ -826,6 +830,55 @@ def bot_devices(telegram_id: int, db: Session = Depends(get_db)) -> list[DeviceR
     ).all()]
 
 
+@app.get("/internal/users/{telegram_id}/vpn-status", dependencies=[Depends(require_internal)])
+def bot_vpn_status(telegram_id: int, db: Session = Depends(get_db)) -> dict:
+    user = bot_user(db, telegram_id)
+    active = db.scalar(select(func.count()).select_from(Device).where(
+        Device.user_id == user.id, Device.is_revoked.is_(False)
+    )) or 0
+    retired = db.scalar(select(func.count()).select_from(RetiredSubscription).where(
+        RetiredSubscription.user_id == user.id
+    )) or 0
+    last_used = db.scalar(select(func.max(Device.last_used_at)).where(
+        Device.user_id == user.id, Device.is_revoked.is_(False)
+    ))
+    nodes, ping = verified_pool_summary(db)
+    return {
+        "active_devices": active,
+        "device_limit": 8,
+        "retired_subscriptions": retired,
+        "can_restore": active == 0 and retired > 0 and current_partner_access(db, user).allowed,
+        "last_subscription_open": last_used.isoformat() if last_used else None,
+        "active_nodes": nodes,
+        "average_ping": round(ping, 1) if ping else None,
+        "access_status": current_partner_access(db, user).status,
+    }
+
+
+@app.patch("/internal/users/{telegram_id}/devices/{device_id}", dependencies=[Depends(require_internal)], response_model=DeviceResponse)
+def bot_rename_device(telegram_id: int, device_id: UUID, payload: DeviceUpdate, db: Session = Depends(get_db)) -> DeviceResponse:
+    user = bot_user(db, telegram_id)
+    device = db.get(Device, device_id)
+    if not device or device.user_id != user.id or device.is_revoked:
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    device.label = payload.label.strip()
+    db.commit()
+    db.refresh(device)
+    return device_response(device)
+
+
+@app.delete("/internal/users/{telegram_id}/devices/{device_id}", dependencies=[Depends(require_internal)])
+def bot_delete_device(telegram_id: int, device_id: UUID, db: Session = Depends(get_db)) -> dict:
+    user = bot_user(db, telegram_id)
+    device = db.get(Device, device_id)
+    if not device or device.user_id != user.id or device.is_revoked:
+        raise HTTPException(status_code=404, detail="Устройство не найдено")
+    retire_device(db, device, "user_deleted")
+    track_event(db, "device_deleted", user_id=user.id)
+    db.commit()
+    return {"deleted": True}
+
+
 @app.post("/internal/users/{telegram_id}/devices/{device_id}/rotate", dependencies=[Depends(require_internal)], response_model=DeviceResponse)
 def bot_rotate_device(telegram_id: int, device_id: UUID, db: Session = Depends(get_db)) -> DeviceResponse:
     user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
@@ -834,11 +887,13 @@ def bot_rotate_device(telegram_id: int, device_id: UUID, db: Session = Depends(g
         raise HTTPException(status_code=404, detail="Устройство не найдено")
     if not current_partner_access(db, user).allowed:
         raise HTTPException(status_code=403, detail="Сначала выполните задания PiarFlow")
+    archive_device_token(db, device, "user_rotated")
     token, token_hash, hint = generate_device_token()
     device.token_hash = token_hash
     device.token_hint = hint
     device.is_revoked = False
     track_event(db, "vpn_issued", user_id=user.id, device_id=device.id)
+    track_event(db, "device_rotated", user_id=user.id, device_id=device.id)
     db.commit()
     return device_response(device, include_url=True, plain_token=token)
 
@@ -930,7 +985,19 @@ def create_support_ticket(telegram_id: int, payload: SupportTicketCreate, db: Se
     ticket = SupportTicket(user_id=user.id)
     db.add(ticket)
     db.flush()
-    db.add(SupportMessage(ticket_id=ticket.id, sender_type="user", text=payload.text.strip()))
+    category_names = {
+        "connection": "Не подключается",
+        "happ": "Ошибка HAPP",
+        "speed": "Низкая скорость",
+        "payment": "Платёж",
+        "other": "Другое",
+    }
+    attachment = f"\nTelegram file_id: {payload.telegram_file_id}" if payload.telegram_file_id else ""
+    db.add(SupportMessage(
+        ticket_id=ticket.id,
+        sender_type="user",
+        text=f"Категория: {category_names[payload.category]}\n\n{payload.text.strip()}{attachment}",
+    ))
     db.commit()
     db.refresh(ticket)
     result = ticket_payload(db, ticket)

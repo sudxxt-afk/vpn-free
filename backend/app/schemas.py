@@ -158,7 +158,7 @@ class MetricSnapshotResponse(BaseModel):
 
 class LandingEventPayload(BaseModel):
     token: str = Field(min_length=16, max_length=256)
-    event_type: str = Field(pattern="^(site_visit|happ_launch)$")
+    event_type: str = Field(pattern="^(site_visit|link_copy|happ_launch|setup_confirmed)$")
 
 
 class InternalEventPayload(BaseModel):
@@ -176,6 +176,8 @@ class PiarFlowWebhookPayload(BaseModel):
 
 class SupportTicketCreate(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
+    category: str = Field(default="other", pattern="^(connection|happ|speed|payment|other)$")
+    telegram_file_id: str | None = Field(default=None, max_length=512)
 
 
 class SupportReplyPayload(BaseModel):
@@ -212,6 +214,8 @@ class AnalyticsDayResponse(BaseModel):
     bot_starts: int = 0
     site_visits: int = 0
     happ_launches: int = 0
+    link_copies: int = 0
+    setup_confirmed: int = 0
     vpn_issued: int = 0
     subscription_opens: int = 0
 
@@ -276,6 +280,8 @@ class AnalyticsResponse(BaseModel):
     bot_starts: int
     unique_site_visitors: int
     happ_launches: int
+    link_copies: int
+    setup_confirmed: int
     vpn_issued: int
     subscription_opens: int
     donation_opens: int
@@ -317,10 +323,16 @@ class DeviceCreate(BaseModel):
     label: str = Field(default="Устройство", min_length=1, max_length=80)
 
 
+class DeviceUpdate(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+
+
 class DeviceResponse(BaseModel):
     id: UUID
     slot: int
     label: str
     token_hint: str
     is_revoked: bool
+    created_at: datetime | None = None
+    last_used_at: datetime | None = None
     subscription_url: str | None = None

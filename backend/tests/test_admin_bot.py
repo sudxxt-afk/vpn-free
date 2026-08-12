@@ -20,6 +20,7 @@ from app.services.analytics import daily_retention_cohorts, sequential_funnel
 from app.services.broadcasts import _recipient_query, _send_delivery, format_broadcast_report
 from app.services import broadcasts
 from app.services.broadcast_drafts import BroadcastDraftStore
+from app.services.interaction_state import InteractionStateStore
 from app.services.donations import (DonationError, complete_star_donation, create_star_donation,
                                     match_ton_transaction, validate_star_checkout)
 from app.services.telegram_html import sanitize_telegram_html
@@ -139,6 +140,19 @@ class AdminBotTests(unittest.TestCase):
 
 
 class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
+    async def test_interaction_state_survives_store_recreation(self):
+        class FakeRedis:
+            values: dict[str, str] = {}
+
+            async def get(self, key): return self.values.get(key)
+            async def set(self, key, value, ex=None): self.values[key] = value
+            async def delete(self, key): self.values.pop(key, None)
+            async def aclose(self): return None
+
+        await InteractionStateStore(FakeRedis()).set(700, "support", category="happ")
+        restored = await InteractionStateStore(FakeRedis()).get(700)
+        self.assertEqual(restored, {"kind": "support", "category": "happ"})
+
     async def test_navigation_edits_text_screen_instead_of_sending_new_message(self):
         message = SimpleNamespace(text="Старый экран", edit_text=AsyncMock(), answer=AsyncMock())
         callback = SimpleNamespace(message=message)
