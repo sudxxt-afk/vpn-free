@@ -11,6 +11,7 @@ from app.models import Device, RetiredSubscription, SubscriptionCutover
 BOT_DEEPLINK = "https://t.me/zazaaVPN_bot?start=reissue"
 GLOBAL_REISSUE_MESSAGE = "Подписка отключена. Перевыпусти её в @zazaaVPN_bot"
 SPONSOR_UNSUBSCRIBED_MESSAGE = "Ты отписался от спонсора. VPN отключён. Перейди в @zazaaVPN_bot и подпишись заново"
+SPONSOR_ACCESS_MESSAGE = "Подпишись на каналы партнёров в @zazaaVPN_bot и обнови подписку"
 
 
 def retirement_message(reason: str) -> str:
@@ -30,6 +31,18 @@ def happ_retirement_payload(reason: str) -> tuple[str, dict[str, str]]:
     # An empty body removes cached proxy rows. HAPP treats metadata-only body
     # lines as proxy configs on some builds, so all notices stay in headers.
     return "", headers
+
+
+def happ_sponsor_gate_payload() -> tuple[str, dict[str, str]]:
+    """Temporarily clear cached nodes while Subgram reports missing subscriptions."""
+    encoded = base64.b64encode(SPONSOR_ACCESS_MESSAGE.encode("utf-8")).decode("ascii")
+    return "", {
+        "Content-Disposition": "inline; filename=subscription.txt",
+        "announce": f"base64:{encoded}",
+        "support-url": "https://t.me/zazaaVPN_bot?start=sponsors",
+        "profile-title": "Zaza VPN - subscribe to sponsors",
+        "profile-update-interval": "1",
+    }
 
 
 def retire_user_devices(db: Session, user_id: UUID, reason: str, batch_id: UUID | None = None) -> int:
@@ -73,7 +86,7 @@ def archive_device_token(db: Session, device: Device, reason: str) -> None:
     db.flush()
 
 
-def run_global_cutover(db: Session, cutover_key: str = "piarflow-onboarding-v1") -> SubscriptionCutover:
+def run_global_cutover(db: Session, cutover_key: str = "sponsor-onboarding-v1") -> SubscriptionCutover:
     existing = db.scalar(select(SubscriptionCutover).where(SubscriptionCutover.cutover_key == cutover_key))
     if existing:
         return existing
@@ -89,7 +102,7 @@ def run_global_cutover(db: Session, cutover_key: str = "piarflow-onboarding-v1")
     return cutover
 
 
-def rollback_global_cutover(db: Session, cutover_key: str = "piarflow-onboarding-v1") -> int:
+def rollback_global_cutover(db: Session, cutover_key: str = "sponsor-onboarding-v1") -> int:
     cutover = db.scalar(select(SubscriptionCutover).where(SubscriptionCutover.cutover_key == cutover_key))
     if not cutover:
         return 0

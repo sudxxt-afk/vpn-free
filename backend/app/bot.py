@@ -2,17 +2,16 @@ import asyncio
 import io
 import logging
 from html import escape
-from typing import Any, Awaitable, Callable
 from urllib.parse import quote, urlparse
 
 import httpx
 import qrcode
-from aiogram import BaseMiddleware, Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup,
-                           InputMediaPhoto, LabeledPrice, Message, PreCheckoutQuery, TelegramObject)
+                           InputMediaPhoto, LabeledPrice, Message, PreCheckoutQuery)
 from aiogram.utils.text_decorations import html_decoration
 
 from app.config import get_settings
@@ -305,13 +304,6 @@ def menu() -> InlineKeyboardMarkup:
     ])
 
 
-def deferred_inventory_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Проверить задания PiarFlow", callback_data="piarflow:check")],
-        *menu().inline_keyboard,
-    ])
-
-
 class BotServiceUnavailable(RuntimeError):
     pass
 
@@ -353,28 +345,22 @@ async def allowed(telegram_id: int, target_devices: int = 1) -> dict:
     return await api("POST", f"/internal/users/{telegram_id}/access", params={"target_devices": target_devices})
 
 
-async def access_status(telegram_id: int) -> dict:
-    return await api("GET", f"/internal/users/{telegram_id}/access")
-
-
 def sponsor_gate_screen(access: dict) -> tuple[str, InlineKeyboardMarkup]:
     sponsors = access.get("sponsors") or []
-    total = max(len(sponsors), int(access.get("sponsor_total") or 0))
-    completed = max(0, total - len(sponsors))
     buttons = [
-        [InlineKeyboardButton(text=f"{index}. Открыть задание", url=item["link"])]
-        for index, item in enumerate(sponsors, start=completed + 1)
+        [InlineKeyboardButton(
+            text=f"{index}. {item.get('button_text') or 'Подписаться'} · {item.get('title') or 'Канал партнёра'}"[:64],
+            url=item["link"],
+        )]
+        for index, item in enumerate(sponsors, start=1)
     ]
-    buttons.append([
-        InlineKeyboardButton(
-            text=f"Проверить выполнение ({completed}/{total})",
-            callback_data="piarflow:check",
-        )
-    ])
     return (
-        "🔐 <b>Доступ к бесплатному VPN</b>\n\n"
-        "Zaza VPN полностью бесплатный. Серверы, проверка конфигов и поддержка стоят денег — админам тоже надо кушать.\n\n"
-        f"Подпишись на спонсоров: <b>{completed} из {total}</b> выполнено. Затем снова отправь /start или нажми «Проверить выполнение».",
+        "🛡 <b>Zaza VPN остаётся полностью бесплатным</b>\n\n"
+        "Мы не продаём доступ и не прячем нормальную скорость за тарифами. "
+        "Чтобы оплачивать серверы, проверки нод и поддержку проекта, достаточно подписаться на несколько каналов партнёров.\n\n"
+        "🥖 Эти подписки помогают админам держать VPN в рабочем состоянии — и иногда даже покупать хлеб.\n\n"
+        "<b>Каналы спонсоров:</b>\n"
+        "Открой каждую кнопку ниже и подпишись. После этого снова отправь /start — бот сразу проверит подписки и откроет VPN.",
         InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
@@ -384,10 +370,8 @@ async def show_access_gate(target: Message | CallbackQuery, access: dict) -> Non
     if sponsors:
         text, reply_markup = sponsor_gate_screen(access)
     else:
-        text = access.get("reason") or "Сначала запусти бота командой /start и выполни задания PiarFlow."
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Проверить ещё раз", callback_data="piarflow:check")],
-        ])
+        text = access.get("reason") or "Доступ пока закрыт. Отправь /start ещё раз через несколько секунд."
+        reply_markup = None
     if isinstance(target, CallbackQuery):
         await edit_callback_screen(target, text, reply_markup=reply_markup)
         await target.answer()
@@ -395,36 +379,13 @@ async def show_access_gate(target: Message | CallbackQuery, access: dict) -> Non
     await target.answer(text, reply_markup=reply_markup)
 
 
-class PiarFlowGateMiddleware(BaseMiddleware):
-    async def __call__(
-        self,
-        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
-        event: TelegramObject,
-        data: dict[str, Any],
-    ) -> Any:
-        if not settings.piarflow_enabled or not settings.piarflow_api_key:
-            return await handler(event, data)
-        if isinstance(event, Message):
-            parts = (event.text or "").split(maxsplit=1)
-            command = parts[0].split("@", 1)[0] if parts else ""
-            if command == "/start" or event.successful_payment:
-                return await handler(event, data)
-        elif isinstance(event, CallbackQuery):
-            if event.data == "piarflow:check":
-                return await handler(event, data)
-        else:
-            return await handler(event, data)
-        telegram_id = await ensure_user(event)
-        access = await access_status(telegram_id)
-        if access.get("allowed"):
-            return await handler(event, data)
-        await show_access_gate(event, access)
-        return None
-
-
-piarflow_gate = PiarFlowGateMiddleware()
-dp.message.outer_middleware(piarflow_gate)
-dp.callback_query.outer_middleware(piarflow_gate)
+async def require_vpn_access(target: Message | CallbackQuery) -> int | None:
+    telegram_id = await ensure_user(target)
+    access = await allowed(telegram_id)
+    if access.get("allowed"):
+        return telegram_id
+    await show_access_gate(target, access)
+    return None
 
 
 async def send_subscription(target: Message | CallbackQuery, device: dict) -> None:
@@ -508,14 +469,6 @@ async def start(message: Message) -> None:
         await message.answer(
             "⚠️ <b>Старая подписка отключена</b>\n\nНажми кнопку ниже: я создам новое основное устройство и сразу выдам рабочую ссылку для HAPP.",
             reply_markup=restore_markup,
-        )
-        return
-    if access.get("status") == "deferred_no_inventory":
-        await message.answer(
-            "⚠️ <b>PiarFlow пока не выдал задания</b>\n\n"
-            "Сервис ответил «Sponsors not found». VPN временно доступен без заданий. "
-            "Нажми кнопку ниже или отправь /start позже — я сразу покажу спонсоров, когда они появятся.",
-            reply_markup=deferred_inventory_menu(),
         )
         return
     await message.answer(
@@ -1041,6 +994,8 @@ async def show_devices(callback: CallbackQuery) -> None:
 
 @dp.callback_query(F.data == "vpn:get")
 async def access_flow(callback: CallbackQuery) -> None:
+    if await require_vpn_access(callback) is None:
+        return
     await show_devices(callback)
 
 
@@ -1052,7 +1007,9 @@ async def vpn_home(callback: CallbackQuery) -> None:
 
 @dp.callback_query(F.data.in_({"vpn:add", "vpn:restore"}))
 async def add_device(callback: CallbackQuery) -> None:
-    telegram_id = await ensure_user(callback)
+    telegram_id = await require_vpn_access(callback)
+    if telegram_id is None:
+        return
     devices = await api("GET", f"/internal/users/{telegram_id}/devices")
     if len(devices) >= 8:
         await callback.answer("Достигнут лимит 8 устройств", show_alert=True)
@@ -1126,35 +1083,10 @@ async def legacy_menu_buttons(callback: CallbackQuery) -> None:
     await access_flow(callback)
 
 
-@dp.callback_query(F.data == "piarflow:check")
-async def check_partner_gate(callback: CallbackQuery) -> None:
-    telegram_id = await ensure_user(callback)
-    access = await allowed(telegram_id)
-    if not access.get("allowed"):
-        await show_access_gate(callback, access)
-        return
-    if access.get("status") == "deferred_no_inventory":
-        await edit_callback_screen(
-            callback,
-            "⚠️ <b>Заданий пока нет</b>\n\nPiarFlow снова ответил «Sponsors not found». Доступ остаётся временно открытым; попробуй проверить позже.",
-            reply_markup=deferred_inventory_menu(),
-        )
-        await callback.answer("PiarFlow пока не выдал задания")
-        return
-    await edit_callback_screen(
-        callback,
-        "✅ <b>Подписки подтверждены</b>\n\nДоступ открыт. Теперь можно получить новую VPN-подписку.",
-        reply_markup=menu(),
-    )
-    await callback.answer("Доступ открыт")
-
-
 @dp.callback_query(F.data.startswith("vpn:rotate:"))
 async def rotate(callback: CallbackQuery) -> None:
-    telegram_id = await ensure_user(callback)
-    access = await access_status(telegram_id)
-    if not access["allowed"]:
-        await callback.answer("Сначала выполните условия доступа", show_alert=True)
+    telegram_id = await require_vpn_access(callback)
+    if telegram_id is None:
         return
     device_id = callback.data.rsplit(":", 1)[1]
     device = await api("POST", f"/internal/users/{telegram_id}/devices/{device_id}/rotate")

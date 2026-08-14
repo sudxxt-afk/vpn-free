@@ -40,13 +40,9 @@ class Settings(BaseSettings):
     subscription_max_per_source: int = 12
     subscription_max_per_host: int = 1
     membership_check_hours: int = 12
-    piarflow_api_key: str = ""
-    piarflow_base_url: str = "https://piarflow.com/v1"
-    piarflow_enabled: bool = False
-    piarflow_webhook_secret: str = ""
-    piarflow_stats_sync_hours: int = 6
-    piarflow_stats_backfill_days: int = 90
-    piarflow_stats_backfill_batch: int = 10
+    subgram_api_key: str = ""
+    subgram_base_url: str = "https://api.subgram.org"
+    subgram_max_sponsors: int = 3
     api_rate_limit_per_minute: int = 120
     subscription_rate_limit_per_minute: int = 20
     login_rate_limit_per_15_minutes: int = 10

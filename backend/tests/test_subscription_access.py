@@ -1,7 +1,6 @@
 import asyncio
 import unittest
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine
@@ -9,12 +8,12 @@ from sqlalchemy.orm import sessionmaker
 from fastapi import HTTPException
 
 from app.database import Base
-from app.main import bot_delete_device, bot_rename_device, bot_rotate_device, bot_vpn_status, piarflow_webhook, subscription
+from app.main import bot_delete_device, bot_rename_device, bot_rotate_device, bot_vpn_status, subscription
 from app.crypto import encrypt
-from app.models import Device, Node, NodeProbeState, NodeState, PiarFlowAccessState, PiarFlowBotSnapshot, RetiredSubscription, Source, TelegramUser
-from app.schemas import DeviceUpdate, PiarFlowWebhookPayload
+from app.models import Device, Node, NodeProbeState, NodeState, RetiredSubscription, Source, TelegramUser
+from app.schemas import DeviceUpdate
 from app.security import hash_token
-from app.services.piarflow import PartnerDecision
+from app.services.subgram import AccessDecision, Sponsor
 
 
 class SubscriptionAccessTests(unittest.TestCase):
@@ -26,7 +25,7 @@ class SubscriptionAccessTests(unittest.TestCase):
     def tearDown(self):
         self.engine.dispose()
 
-    def test_existing_subscription_does_not_recheck_sponsor_tasks(self):
+    def test_existing_subscription_rechecks_subgram_and_temporarily_clears_nodes(self):
         with self.Session() as db:
             user = TelegramUser(telegram_id=1001, username="tester")
             db.add(user)
@@ -39,14 +38,16 @@ class SubscriptionAccessTests(unittest.TestCase):
                 token_hash=hash_token(token),
                 token_hint="token",
             ))
-            db.add(PiarFlowAccessState(user_id=user.id, status="completed"))
             db.commit()
 
-            with patch("app.main.get_partner_access", AsyncMock(return_value=PartnerDecision(False))) as partner:
+            denied = AccessDecision(False, "warning", (Sponsor("https://t.me/sponsor"),), 1)
+            with patch("app.main.get_subgram_access", AsyncMock(return_value=denied)) as subgram:
                 response = asyncio.run(subscription(token, db))
 
             self.assertEqual(response.status_code, 200)
-            partner.assert_not_awaited()
+            self.assertEqual(response.body, b"")
+            self.assertIn("start=sponsors", response.headers["support-url"])
+            subgram.assert_awaited_once_with(1001, username="tester")
 
     def test_subscription_marks_dedicated_auto_routes_for_happ_network_filter(self):
         with self.Session() as db:
@@ -55,7 +56,6 @@ class SubscriptionAccessTests(unittest.TestCase):
             db.flush()
             token = "auto-routes-token"
             db.add(Device(user_id=user.id, slot=1, label="Phone", token_hash=hash_token(token), token_hint="auto"))
-            db.add(PiarFlowAccessState(user_id=user.id, status="completed"))
             source = Source(name="test", github_url="https://github.com/example/test", raw_url="https://raw.githubusercontent.com/example/test")
             db.add(source)
             db.flush()
@@ -79,7 +79,8 @@ class SubscriptionAccessTests(unittest.TestCase):
                 ))
             db.commit()
 
-            response = asyncio.run(subscription(token, db))
+            with patch("app.main.get_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok"))):
+                response = asyncio.run(subscription(token, db))
 
             body = response.body.decode()
             self.assertIn("only%20WiFi", body)
@@ -119,7 +120,6 @@ class SubscriptionAccessTests(unittest.TestCase):
         with self.Session() as db:
             user = TelegramUser(telegram_id=1100, username="devices")
             db.add(user); db.flush()
-            db.add(PiarFlowAccessState(user_id=user.id, status="completed"))
             old = RetiredSubscription(
                 original_device_id=user.id, user_id=user.id, slot=1, label="Old phone",
                 token_hash=hash_token("old-device"), token_hint="old", reason="global_reissue",
@@ -133,7 +133,8 @@ class SubscriptionAccessTests(unittest.TestCase):
             renamed = bot_rename_device(1100, device.id, DeviceUpdate(label="Laptop"), db)
             self.assertEqual(renamed.label, "Laptop")
 
-            rotated = bot_rotate_device(1100, device.id, db)
+            with patch("app.main.get_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok"))):
+                rotated = asyncio.run(bot_rotate_device(1100, device.id, db))
             self.assertIsNotNone(rotated.subscription_url)
             self.assertEqual(db.query(RetiredSubscription).count(), 2)
             self.assertFalse(bot_vpn_status(1100, db)["can_restore"])
@@ -141,21 +142,4 @@ class SubscriptionAccessTests(unittest.TestCase):
             result = bot_delete_device(1100, device.id, db)
             self.assertTrue(result["deleted"])
             self.assertTrue(bot_vpn_status(1100, db)["can_restore"])
-            self.assertEqual(db.query(Device).count(), 0)
-
-    def test_webhook_test_is_side_effect_free_and_unsubscribe_revokes(self):
-        with self.Session() as db, patch("app.main.settings", SimpleNamespace(piarflow_webhook_secret="secret")):
-            user = TelegramUser(telegram_id=2001)
-            db.add(user)
-            db.flush()
-            db.add(PiarFlowAccessState(user_id=user.id, status="completed"))
-            db.add(PiarFlowBotSnapshot(id=1, bot_id=10))
-            db.add(Device(user_id=user.id, slot=1, label="Phone", token_hash=hash_token("live"), token_hint="live"))
-            db.commit()
-
-            self.assertTrue(piarflow_webhook("secret", PiarFlowWebhookPayload(test=True), db)["test"])
-            result = piarflow_webhook("secret", PiarFlowWebhookPayload(
-                tg_user_id=2001, offer_link="https://t.me/sponsor", status="unsubscribed", bot_id=10,
-            ), db)
-            self.assertEqual(result["revoked_devices"], 1)
             self.assertEqual(db.query(Device).count(), 0)

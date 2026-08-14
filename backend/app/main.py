@@ -1,7 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import json
-import secrets
 from uuid import UUID
 
 import httpx
@@ -16,28 +15,26 @@ from app.config import get_settings
 from app.crypto import decrypt
 from app.database import Base, SessionLocal, engine, get_db
 from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, BroadcastDelivery, Device, Donation, MetricSnapshot,
-                        Node, NodeProbeAttempt, NodeProbeState, NodeState, PiarFlowAccessState, PiarFlowBotSnapshot,
-                        PiarFlowDailyStat, PiarFlowEvent, PoolPolicy, RequiredChannel, RetiredSubscription, Role, Source,
+                        Node, NodeProbeAttempt, NodeProbeState, NodeState, PoolPolicy, RequiredChannel, RetiredSubscription, Role, Source,
                         SourceQuality, SourceRun, SupportMessage, SupportTicket, TelegramUser)
 from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLookup, BotUserRequest, BroadcastCreate, ChannelCreate, ChannelResponse, DashboardResponse,
                          DeviceCreate, DeviceResponse, DeviceUpdate, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
                          AnalyticsCohortResponse, AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
                          NodeProbeAttemptResponse, NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, StarDonationComplete,
-                         StarDonationIntent, StarDonationPreCheckout, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare,
-                         PiarFlowAnalyticsResponse, PiarFlowDailyResponse, PiarFlowWebhookPayload)
+                         StarDonationIntent, StarDonationPreCheckout, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_github_url, refresh_source
 from app.services.parser import address_diversity_key, classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.health import verified_pool_conditions
 from app.services.telegram import has_required_memberships, validate_bot_admin
-from app.services.piarflow import current_partner_access, get_partner_access, handle_unsubscribe
+from app.services.subgram import get_subgram_access
 from app.services.rate_limit import is_allowed
 from app.services.telegram_html import sanitize_telegram_html
 from app.services.analytics import daily_retention_cohorts, sequential_funnel
 from app.services.donations import (DonationError, complete_star_donation, create_star_donation, create_ton_session,
                                     donation_analytics, donation_by_public_token, donation_summary, prepare_ton_donation,
                                     public_ton_payload, validate_star_checkout, verify_pending_ton_donations)
-from app.services.subscriptions import archive_device_token, happ_retirement_payload, retire_device
+from app.services.subscriptions import archive_device_token, happ_retirement_payload, happ_sponsor_gate_payload, retire_device
 
 settings = get_settings()
 
@@ -323,56 +320,6 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
     ).all()
     cohorts = daily_retention_cohorts(first_starts, events, now.date(), cohort_days=min(days, 14))
     donation_totals = donation_analytics(db, start)
-    partner_events = db.scalars(
-        select(PiarFlowEvent).where(PiarFlowEvent.created_at >= start).order_by(PiarFlowEvent.created_at)
-    ).all()
-    partner_users = lambda name: {
-        event.user_id for event in partner_events if event.event_type == name and event.user_id is not None
-    }
-    barrier_users = partner_users("barrier_shown")
-    task_users = partner_users("tasks_issued")
-    check_users = partner_users("check_attempt")
-    completed_users = partner_users("completed")
-    checks_by_user: dict[UUID, int] = {}
-    for event in partner_events:
-        if event.event_type == "check_attempt" and event.user_id is not None:
-            checks_by_user[event.user_id] = checks_by_user.get(event.user_id, 0) + 1
-    completed_checks = [checks_by_user.get(user_id, 0) for user_id in completed_users]
-    snapshot = db.get(PiarFlowBotSnapshot, 1)
-    partner_days = db.scalars(
-        select(PiarFlowDailyStat).where(PiarFlowDailyStat.date >= start.date()).order_by(PiarFlowDailyStat.date)
-    ).all()
-    status_count = lambda value: db.scalar(
-        select(func.count()).select_from(PiarFlowAccessState).where(PiarFlowAccessState.status == value)
-    ) or 0
-    partner_analytics = PiarFlowAnalyticsResponse(
-        enabled=settings.piarflow_enabled,
-        provider_active=snapshot.is_active if snapshot else None,
-        username=snapshot.username if snapshot else None,
-        max_sponsors=snapshot.max_sponsors if snapshot else 0,
-        reset_time=snapshot.reset_time if snapshot else 0,
-        sold_subs=snapshot.sold_subs if snapshot else 0,
-        not_counted=snapshot.not_counted if snapshot else 0,
-        earned=round(snapshot.earned, 2) if snapshot else 0,
-        last_synced_at=snapshot.last_synced_at if snapshot else None,
-        last_error=snapshot.last_error if snapshot else None,
-        barrier_users=len(barrier_users),
-        task_users=len(task_users),
-        check_users=len(check_users),
-        completed_users=len(completed_users),
-        pending_users=status_count("pending"),
-        deferred_users=status_count("deferred_no_inventory"),
-        unsubscribed_users=status_count("unsubscribed"),
-        check_attempts=sum(checks_by_user.values()),
-        average_checks_to_complete=round(sum(completed_checks) / len(completed_checks), 2) if completed_checks else 0,
-        api_errors=sum(1 for event in partner_events if event.event_type == "api_error"),
-        no_inventory=sum(1 for event in partner_events if event.event_type == "no_inventory"),
-        unsubscribe_events=sum(1 for event in partner_events if event.event_type == "unsubscribed"),
-        revoked_devices=sum(event.revoked_devices for event in partner_events),
-        check_conversion=round(len(check_users) * 100 / len(barrier_users), 1) if barrier_users else 0,
-        completion_conversion=round(len(completed_users) * 100 / len(barrier_users), 1) if barrier_users else 0,
-        days=[PiarFlowDailyResponse(date=item.date, sold_subs=item.sold_subs, earned=item.earned) for item in partner_days],
-    )
     return AnalyticsResponse(
         total_bot_users=db.scalar(select(func.count()).select_from(TelegramUser)) or 0,
         new_bot_users=db.scalar(select(func.count()).select_from(TelegramUser).where(TelegramUser.created_at >= start)) or 0,
@@ -397,7 +344,6 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
         **donation_totals,
         days=[AnalyticsDayResponse(date=date, **values) for date, values in points.items()],
         cohorts=[AnalyticsCohortResponse(**item) for item in cohorts],
-        piarflow=partner_analytics,
     )
 
 
@@ -771,46 +717,16 @@ def landing_event(payload: LandingEventPayload, db: Session = Depends(get_db)) -
     return {"status": "recorded"}
 
 
-@app.post("/webhooks/piarflow/{webhook_secret}")
-def piarflow_webhook(webhook_secret: str, payload: PiarFlowWebhookPayload, db: Session = Depends(get_db)) -> dict:
-    configured = settings.piarflow_webhook_secret
-    if not configured or not secrets.compare_digest(webhook_secret, configured):
-        raise HTTPException(status_code=404, detail="Webhook не найден")
-    if payload.test:
-        return {"ok": True, "test": True}
-    if payload.status != "unsubscribed" or payload.tg_user_id is None or not payload.offer_link:
-        raise HTTPException(status_code=422, detail="Некорректное событие PiarFlow")
-    snapshot = db.get(PiarFlowBotSnapshot, 1)
-    if snapshot and snapshot.bot_id and payload.bot_id and snapshot.bot_id != payload.bot_id:
-        raise HTTPException(status_code=403, detail="Событие предназначено другому боту")
-    revoked = handle_unsubscribe(db, payload.tg_user_id, payload.offer_link, payload.bot_id)
-    return {"ok": True, "revoked_devices": revoked}
-
-
 @app.post("/internal/users/{telegram_id}/access", dependencies=[Depends(require_internal)])
 async def bot_access(telegram_id: int, target_devices: int = 1, db: Session = Depends(get_db)) -> dict:
+    del target_devices
     user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
     if not user or user.is_blocked:
         return {"allowed": False, "reason": "Пользователь заблокирован"}
     allowed = await has_required_memberships(db, user)
     if not allowed:
         return {"allowed": False, "reason": "Подпишитесь на обязательные каналы", "sponsors": []}
-    decision = await get_partner_access(db, user, target_devices)
-    return {
-        "allowed": decision.allowed,
-        "status": decision.status,
-        "reason": decision.reason,
-        "sponsors": [{"link": item.link, "title": item.title, "button_text": item.button_text} for item in decision.sponsors],
-        "sponsor_total": decision.sponsor_total,
-    }
-
-
-@app.get("/internal/users/{telegram_id}/access", dependencies=[Depends(require_internal)])
-def bot_access_status(telegram_id: int, db: Session = Depends(get_db)) -> dict:
-    user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
-    if not user or user.is_blocked:
-        return {"allowed": False, "status": "blocked", "reason": "Пользователь заблокирован", "sponsors": [], "sponsor_total": 0}
-    decision = current_partner_access(db, user)
+    decision = await get_subgram_access(user.telegram_id, username=user.username)
     return {
         "allowed": decision.allowed,
         "status": decision.status,
@@ -847,11 +763,11 @@ def bot_vpn_status(telegram_id: int, db: Session = Depends(get_db)) -> dict:
         "active_devices": active,
         "device_limit": 8,
         "retired_subscriptions": retired,
-        "can_restore": active == 0 and retired > 0 and current_partner_access(db, user).allowed,
+        "can_restore": active == 0 and retired > 0,
         "last_subscription_open": last_used.isoformat() if last_used else None,
         "active_nodes": nodes,
         "average_ping": round(ping, 1) if ping else None,
-        "access_status": current_partner_access(db, user).status,
+        "access_status": "Subgram · проверка при выдаче VPN",
     }
 
 
@@ -880,13 +796,14 @@ def bot_delete_device(telegram_id: int, device_id: UUID, db: Session = Depends(g
 
 
 @app.post("/internal/users/{telegram_id}/devices/{device_id}/rotate", dependencies=[Depends(require_internal)], response_model=DeviceResponse)
-def bot_rotate_device(telegram_id: int, device_id: UUID, db: Session = Depends(get_db)) -> DeviceResponse:
+async def bot_rotate_device(telegram_id: int, device_id: UUID, db: Session = Depends(get_db)) -> DeviceResponse:
     user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
     device = db.get(Device, device_id)
     if not user or not device or device.user_id != user.id:
         raise HTTPException(status_code=404, detail="Устройство не найдено")
-    if not current_partner_access(db, user).allowed:
-        raise HTTPException(status_code=403, detail="Сначала выполните задания PiarFlow")
+    access = await get_subgram_access(user.telegram_id, username=user.username)
+    if not access.allowed:
+        raise HTTPException(status_code=403, detail="Сначала подпишитесь на каналы партнёров через /start")
     archive_device_token(db, device, "user_rotated")
     token, token_hash, hint = generate_device_token()
     device.token_hash = token_hash
@@ -920,9 +837,9 @@ async def bot_create_device(telegram_id: int, payload: DeviceCreate, db: Session
         raise HTTPException(status_code=409, detail="Доступно не более 8 устройств")
     if not await has_required_memberships(db, user):
         raise HTTPException(status_code=403, detail="Подпишитесь на обязательные каналы")
-    partner = current_partner_access(db, user)
-    if not partner.allowed:
-        raise HTTPException(status_code=403, detail="Сначала выполните условия партнёрского доступа")
+    access = await get_subgram_access(user.telegram_id, username=user.username)
+    if not access.allowed:
+        raise HTTPException(status_code=403, detail="Сначала подпишитесь на каналы партнёров через /start")
     occupied = {item.slot for item in existing}
     slot = next(slot for slot in range(1, 9) if slot not in occupied)
     token, token_hash, hint = generate_device_token()
@@ -1195,8 +1112,12 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
             return Response(content=body, media_type="text/plain; charset=utf-8", headers=headers)
         raise HTTPException(status_code=404, detail="Подписка не найдена")
     user = db.get(TelegramUser, device.user_id)
-    if not user or user.is_blocked or not current_partner_access(db, user).allowed or not await has_required_memberships(db, user):
+    if not user or user.is_blocked or not await has_required_memberships(db, user):
         raise HTTPException(status_code=403, detail="Выполните условия доступа в Telegram-боте")
+    access = await get_subgram_access(user.telegram_id, username=user.username)
+    if not access.allowed:
+        body, headers = happ_sponsor_gate_payload()
+        return Response(content=body, media_type="text/plain; charset=utf-8", headers=headers)
     track_event(db, "subscription_open", user_id=user.id, device_id=device.id)
     policy = pool_policy(db)
     rows = db.execute(

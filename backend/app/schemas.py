@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -165,15 +165,6 @@ class InternalEventPayload(BaseModel):
     event_type: str = Field(pattern="^(bot_start|vpn_issued|donation_open)$")
 
 
-class PiarFlowWebhookPayload(BaseModel):
-    tg_user_id: int | None = None
-    offer_link: str | None = Field(default=None, max_length=2048)
-    status: str | None = Field(default=None, max_length=32)
-    chat_id: int | None = None
-    bot_id: int | None = None
-    test: bool = False
-
-
 class SupportTicketCreate(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     category: str = Field(default="other", pattern="^(connection|happ|speed|payment|other)$")
@@ -229,41 +220,6 @@ class AnalyticsCohortResponse(BaseModel):
     d7: float | None = None
 
 
-class PiarFlowDailyResponse(BaseModel):
-    date: date
-    sold_subs: int
-    earned: float
-
-
-class PiarFlowAnalyticsResponse(BaseModel):
-    enabled: bool
-    provider_active: bool | None = None
-    username: str | None = None
-    max_sponsors: int = 0
-    reset_time: int = 0
-    sold_subs: int = 0
-    not_counted: int = 0
-    earned: float = 0
-    last_synced_at: datetime | None = None
-    last_error: str | None = None
-    barrier_users: int = 0
-    task_users: int = 0
-    check_users: int = 0
-    completed_users: int = 0
-    pending_users: int = 0
-    deferred_users: int = 0
-    unsubscribed_users: int = 0
-    check_attempts: int = 0
-    average_checks_to_complete: float = 0
-    api_errors: int = 0
-    no_inventory: int = 0
-    unsubscribe_events: int = 0
-    revoked_devices: int = 0
-    check_conversion: float = 0
-    completion_conversion: float = 0
-    days: list[PiarFlowDailyResponse] = Field(default_factory=list)
-
-
 class AnalyticsResponse(BaseModel):
     total_bot_users: int
     new_bot_users: int
@@ -292,7 +248,6 @@ class AnalyticsResponse(BaseModel):
     donation_ton_total: float
     days: list[AnalyticsDayResponse]
     cohorts: list[AnalyticsCohortResponse]
-    piarflow: PiarFlowAnalyticsResponse
 
 
 class StarDonationIntent(BaseModel):
