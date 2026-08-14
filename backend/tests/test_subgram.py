@@ -150,7 +150,7 @@ class SubgramStartTests(unittest.IsolatedAsyncioTestCase):
         text = message.answer.await_args.args[0]
         self.assertIn("Каналы спонсоров", text)
         self.assertEqual(message.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0].url, "https://t.me/sponsor")
-        api.assert_awaited_once()
+        self.assertEqual(api.await_count, 2)
 
 
 if __name__ == "__main__":

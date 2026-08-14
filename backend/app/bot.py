@@ -456,10 +456,6 @@ async def start(message: Message) -> None:
         await api("POST", f"/internal/users/{telegram_id}/events", json={"event_type": "bot_start"})
     except Exception:
         logging.exception("Unable to record bot start analytics event")
-    access = await allowed(telegram_id)
-    if not access.get("allowed"):
-        await show_access_gate(message, access)
-        return
     vpn_status = await api("GET", f"/internal/users/{telegram_id}/vpn-status")
     if vpn_status.get("can_restore"):
         restore_markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -467,9 +463,14 @@ async def start(message: Message) -> None:
             *menu().inline_keyboard,
         ])
         await message.answer(
-            "⚠️ <b>Старая подписка отключена</b>\n\nНажми кнопку ниже: я создам новое основное устройство и сразу выдам рабочую ссылку для HAPP.",
+            "⚠️ <b>Старая подписка отключена</b>\n\nНажми «Возобновить подписку». "
+            "Если есть задания спонсоров, бот сначала покажет их — новая VPN-ссылка появится только после подписки.",
             reply_markup=restore_markup,
         )
+        return
+    access = await allowed(telegram_id)
+    if not access.get("allowed"):
+        await show_access_gate(message, access)
         return
     await message.answer(
         "👋 <b>Добро пожаловать в Zaza VPN</b>\n\nБесплатный VPN с автоматическим выбором сильной ноды для Wi‑Fi и LTE.",
