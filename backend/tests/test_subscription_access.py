@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -9,7 +10,8 @@ from fastapi import HTTPException
 
 from app.database import Base
 from app.main import bot_delete_device, bot_rename_device, bot_rotate_device, bot_vpn_status, piarflow_webhook, subscription
-from app.models import Device, PiarFlowAccessState, PiarFlowBotSnapshot, RetiredSubscription, TelegramUser
+from app.crypto import encrypt
+from app.models import Device, Node, NodeProbeState, NodeState, PiarFlowAccessState, PiarFlowBotSnapshot, RetiredSubscription, Source, TelegramUser
 from app.schemas import DeviceUpdate, PiarFlowWebhookPayload
 from app.security import hash_token
 from app.services.piarflow import PartnerDecision
@@ -45,6 +47,44 @@ class SubscriptionAccessTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             partner.assert_not_awaited()
+
+    def test_subscription_marks_dedicated_auto_routes_for_happ_network_filter(self):
+        with self.Session() as db:
+            user = TelegramUser(telegram_id=1003, username="auto-routes")
+            db.add(user)
+            db.flush()
+            token = "auto-routes-token"
+            db.add(Device(user_id=user.id, slot=1, label="Phone", token_hash=hash_token(token), token_hint="auto"))
+            db.add(PiarFlowAccessState(user_id=user.id, status="completed"))
+            source = Source(name="test", github_url="https://github.com/example/test", raw_url="https://raw.githubusercontent.com/example/test")
+            db.add(source)
+            db.flush()
+            now = datetime.now(timezone.utc)
+            configs = (
+                ("wifi", "vless://wifi-id@8.8.8.8:443?security=tls#WiFi"),
+                ("mobile", "vless://mobile-id@8.8.4.4:443?security=reality#Mobile"),
+            )
+            for profile, raw in configs:
+                node = Node(
+                    source_id=source.id, fingerprint=f"{profile}-fingerprint", protocol="vless",
+                    host="8.8.8.8" if profile == "wifi" else "8.8.4.4", port=443,
+                    config_ciphertext=encrypt(raw), state=NodeState.ACTIVE, score=100,
+                    success_checks=2,
+                )
+                db.add(node)
+                db.flush()
+                db.add(NodeProbeState(
+                    node_id=node.id, stage="passed", static_valid=True, xray_started=True,
+                    http_successes=1, http_attempts=1, last_checked_at=now, last_success_at=now,
+                ))
+            db.commit()
+
+            response = asyncio.run(subscription(token, db))
+
+            body = response.body.decode()
+            self.assertIn("only%20WiFi", body)
+            self.assertIn("only%20Mobile", body)
+            self.assertEqual(response.headers["profile-update-interval"], "1")
 
     def test_retired_subscription_returns_happ_reissue_notice(self):
         with self.Session() as db:

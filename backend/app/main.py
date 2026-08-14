@@ -1240,7 +1240,14 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
     # next subscription refresh when the measured best candidate changes.
     payload_lines: list[str] = []
     auto_ids: set[UUID] = set()
-    for profile, label in (("wifi", "📶 Автоподключение Wi‑Fi"), ("mobile", "📡 Автоподключение LTE")):
+    # HAPP applies its built-in network filter only to the exact `only WiFi`
+    # and `only Mobile` markers.  Keep those markers on the two dedicated
+    # routes only: the remaining servers are universal fallbacks if a
+    # transport hint turns out to be wrong for a particular carrier.
+    for profile, label in (
+        ("wifi", "📶 only WiFi · Автоподключение Wi‑Fi"),
+        ("mobile", "📡 only Mobile · Автоподключение LTE"),
+    ):
         candidate = best_by_profile.get(profile)
         if candidate:
             node, _source = candidate
@@ -1258,4 +1265,13 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
     # HAPP's ordinary URL subscriptions expect newline-separated share links,
     # not a Base64 envelope. Returning raw links also makes diagnostics in the
     # client much clearer when one source contains a malformed configuration.
-    return Response(content=payload, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": "inline; filename=subscription.txt"})
+    return Response(
+        content=payload,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": "inline; filename=subscription.txt",
+            # Standard HAPP subscription control: refresh the measured auto
+            # routes regularly without requiring a Provider ID.
+            "profile-update-interval": "1",
+        },
+    )
