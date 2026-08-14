@@ -257,7 +257,7 @@ class XrayProbeTests(unittest.TestCase):
     def test_independent_passes_promote_and_network_failures_use_grace(self):
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)
-        Session = sessionmaker(bind=engine)
+        Session = sessionmaker(bind=engine, autoflush=False)
         with Session() as db:
             source = Source(name="test", github_url="https://github.com/a/b", raw_url="https://raw.githubusercontent.com/a/b/main/list")
             db.add(source); db.flush()

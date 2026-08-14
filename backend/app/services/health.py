@@ -296,6 +296,10 @@ def apply_probe_result(db: Session, node: Node, result: ProbeResult) -> None:
         latency_ms=result.latency_ms, throughput_kbps=result.throughput_kbps,
         error=result.error, checked_at=now,
     ))
+    # Production sessions disable autoflush. Persist this attempt before the
+    # temporal-pass and counter queries below so the second successful probe
+    # can promote a node immediately instead of waiting for a third cycle.
+    db.flush()
     if result.failure_class == "probe_infrastructure":
         return
     if not had_attempts:
