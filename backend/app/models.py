@@ -1,8 +1,8 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -228,6 +228,33 @@ class AnalyticsEvent(Base):
     telegram_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("telegram_users.id", ondelete="SET NULL"), nullable=True, index=True)
     device_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("devices.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class SubgramWebhookEvent(Base):
+    """Immutable, deduplicated Subgram delivery without storing sponsor URLs."""
+    __tablename__ = "subgram_webhook_events"
+    webhook_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    telegram_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("telegram_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    ads_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    resource_key: Mapped[str] = mapped_column(String(80), index=True)
+    link_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    subscribe_date: Mapped[date] = mapped_column(Date)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class SubgramSponsorState(Base):
+    """Latest event for one user and sponsor; used for immediate HAPP gating."""
+    __tablename__ = "subgram_sponsor_states"
+    __table_args__ = (UniqueConstraint("telegram_id", "resource_key", name="uq_subgram_sponsor_state"),)
+    id: Mapped[uuid.UUID] = uuid_column()
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    resource_key: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    latest_webhook_id: Mapped[int] = mapped_column(BigInteger)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class AuditLog(Base):

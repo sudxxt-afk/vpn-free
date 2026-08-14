@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -267,6 +267,26 @@ class SubgramStatisticsResponse(BaseModel):
     total_requests: int
     successful_requests: int
     days: list[SubgramStatisticsDayResponse]
+    webhook_received: int
+    webhook_subscribed: int
+    webhook_notgetted: int
+    webhook_unsubscribed: int
+    webhook_blocked_users: int
+    webhook_last_received_at: datetime | None
+
+
+class SubgramWebhookEventPayload(BaseModel):
+    webhook_id: int = Field(gt=0)
+    ads_id: int | None = Field(default=None, gt=0)
+    link: str = Field(min_length=1, max_length=2048)
+    user_id: int = Field(gt=0)
+    bot_id: int = Field(gt=0)
+    status: str = Field(pattern="^(subscribed|notgetted|unsubscribed)$")
+    subscribe_date: date
+
+
+class SubgramWebhookPayload(BaseModel):
+    webhooks: list[SubgramWebhookEventPayload] = Field(min_length=1, max_length=500)
 
 
 class StarDonationIntent(BaseModel):

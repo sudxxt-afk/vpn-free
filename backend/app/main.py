@@ -16,19 +16,21 @@ from app.crypto import decrypt
 from app.database import Base, SessionLocal, engine, get_db
 from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, BroadcastDelivery, Device, Donation, MetricSnapshot,
                         Node, NodeProbeAttempt, NodeProbeState, NodeState, PoolPolicy, RequiredChannel, RetiredSubscription, Role, Source,
-                        SourceQuality, SourceRun, SupportMessage, SupportTicket, TelegramUser)
+                        SourceQuality, SourceRun, SubgramSponsorState, SubgramWebhookEvent, SupportMessage, SupportTicket, TelegramUser)
 from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLookup, BotUserRequest, BroadcastCreate, ChannelCreate, ChannelResponse, DashboardResponse,
                          DeviceCreate, DeviceResponse, DeviceUpdate, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
                          AnalyticsCohortResponse, AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
                          NodeProbeAttemptResponse, NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, StarDonationComplete,
                          StarDonationIntent, StarDonationPreCheckout, SubgramStatisticsDayResponse, SubgramStatisticsResponse,
-                         SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
+                         SubgramWebhookPayload, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_github_url, refresh_source
 from app.services.parser import address_diversity_key, classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.health import verified_pool_conditions
 from app.services.telegram import has_required_memberships, validate_bot_admin
 from app.services.subgram import get_subgram_access, get_subgram_statistics
+from app.services.subgram_webhooks import (clear_webhook_blocks_after_live_check, expected_bot_id, has_webhook_block,
+                                           process_webhooks, webhook_key_is_valid)
 from app.services.rate_limit import is_allowed
 from app.services.telegram_html import sanitize_telegram_html
 from app.services.analytics import daily_retention_cohorts, sequential_funnel
@@ -349,9 +351,16 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
 
 
 @app.get("/admin/subgram-analytics", response_model=SubgramStatisticsResponse)
-async def subgram_analytics(request: Request, days: int = 14) -> SubgramStatisticsResponse:
+async def subgram_analytics(request: Request, days: int = 14, db: Session = Depends(get_db)) -> SubgramStatisticsResponse:
     require_admin(request)
-    statistics = await get_subgram_statistics(max(1, min(days, 90)))
+    days = max(1, min(days, 90))
+    statistics = await get_subgram_statistics(days)
+    webhook_from = datetime.now(timezone.utc) - timedelta(days=days - 1)
+    webhook_counts = dict(db.execute(
+        select(SubgramWebhookEvent.status, func.count()).where(
+            SubgramWebhookEvent.received_at >= webhook_from
+        ).group_by(SubgramWebhookEvent.status)
+    ).all())
     return SubgramStatisticsResponse(
         configured=statistics.configured,
         available=statistics.available,
@@ -362,7 +371,39 @@ async def subgram_analytics(request: Request, days: int = 14) -> SubgramStatisti
         total_requests=statistics.total_requests,
         successful_requests=statistics.successful_requests,
         days=[SubgramStatisticsDayResponse(**point.__dict__) for point in statistics.days],
+        webhook_received=sum(webhook_counts.values()),
+        webhook_subscribed=webhook_counts.get("subscribed", 0),
+        webhook_notgetted=webhook_counts.get("notgetted", 0),
+        webhook_unsubscribed=webhook_counts.get("unsubscribed", 0),
+        webhook_blocked_users=db.scalar(select(func.count(func.distinct(SubgramSponsorState.telegram_id))).where(
+            SubgramSponsorState.status == "unsubscribed"
+        )) or 0,
+        webhook_last_received_at=db.scalar(select(func.max(SubgramWebhookEvent.received_at))),
     )
+
+
+@app.post("/webhooks/subgram")
+def subgram_webhook(
+    payload: SubgramWebhookPayload,
+    api_key: str | None = Header(default=None, alias="Api-Key"),
+    db: Session = Depends(get_db),
+) -> dict:
+    if not webhook_key_is_valid(api_key):
+        raise HTTPException(status_code=401, detail="Invalid Subgram webhook key")
+    bot_id = expected_bot_id()
+    if bot_id is None:
+        raise HTTPException(status_code=503, detail="Telegram bot is not configured")
+    if any(item.bot_id != bot_id for item in payload.webhooks):
+        raise HTTPException(status_code=403, detail="Webhook belongs to another bot")
+    result = process_webhooks(db, payload.webhooks)
+    db.commit()
+    return {
+        "status": "ok",
+        "received": result.received,
+        "processed": result.processed,
+        "duplicates": result.duplicates,
+        "stale": result.stale,
+    }
 
 
 @app.post("/admin/donations/{donation_id}/refund")
@@ -745,6 +786,8 @@ async def bot_access(telegram_id: int, target_devices: int = 1, db: Session = De
     if not allowed:
         return {"allowed": False, "reason": "Подпишитесь на обязательные каналы", "sponsors": []}
     decision = await get_subgram_access(user.telegram_id, username=user.username)
+    if decision.status == "ok" and clear_webhook_blocks_after_live_check(db, user.telegram_id):
+        db.commit()
     return {
         "allowed": decision.allowed,
         "status": decision.status,
@@ -822,6 +865,8 @@ async def bot_rotate_device(telegram_id: int, device_id: UUID, db: Session = Dep
     access = await get_subgram_access(user.telegram_id, username=user.username)
     if not access.allowed:
         raise HTTPException(status_code=403, detail="Сначала подпишитесь на каналы партнёров через /start")
+    if access.status == "ok":
+        clear_webhook_blocks_after_live_check(db, user.telegram_id)
     archive_device_token(db, device, "user_rotated")
     token, token_hash, hint = generate_device_token()
     device.token_hash = token_hash
@@ -858,6 +903,8 @@ async def bot_create_device(telegram_id: int, payload: DeviceCreate, db: Session
     access = await get_subgram_access(user.telegram_id, username=user.username)
     if not access.allowed:
         raise HTTPException(status_code=403, detail="Сначала подпишитесь на каналы партнёров через /start")
+    if access.status == "ok":
+        clear_webhook_blocks_after_live_check(db, user.telegram_id)
     occupied = {item.slot for item in existing}
     slot = next(slot for slot in range(1, 9) if slot not in occupied)
     token, token_hash, hint = generate_device_token()
@@ -1132,10 +1179,15 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
     user = db.get(TelegramUser, device.user_id)
     if not user or user.is_blocked or not await has_required_memberships(db, user):
         raise HTTPException(status_code=403, detail="Выполните условия доступа в Telegram-боте")
+    if has_webhook_block(db, user.telegram_id):
+        body, headers = happ_sponsor_gate_payload()
+        return Response(content=body, media_type="text/plain; charset=utf-8", headers=headers)
     access = await get_subgram_access(user.telegram_id, username=user.username)
     if not access.allowed:
         body, headers = happ_sponsor_gate_payload()
         return Response(content=body, media_type="text/plain; charset=utf-8", headers=headers)
+    if access.status == "ok":
+        clear_webhook_blocks_after_live_check(db, user.telegram_id)
     track_event(db, "subscription_open", user_id=user.id, device_id=device.id)
     policy = pool_policy(db)
     rows = db.execute(
