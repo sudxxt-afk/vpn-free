@@ -37,6 +37,14 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(parse_config("wireguard://key@1.1.1.1:443"))
         self.assertEqual(parse_payload("vless://id@127.0.0.1:443\ninvalid"), [])
 
+    def test_skips_malformed_authority_without_aborting_payload(self):
+        malformed = "vless://id@[email\u00a0protected]:443"
+        valid = "vless://id@8.8.8.8:443"
+        self.assertIsNone(parse_config(malformed))
+        parsed = parse_payload(f"{malformed}\n{valid}")
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].host, "8.8.8.8")
+
     def test_groups_literal_addresses_for_pool_diversity(self):
         self.assertEqual(address_diversity_key("8.8.8.8"), "8.8.8.0/24")
         self.assertEqual(address_diversity_key("8.8.8.200"), "8.8.8.0/24")

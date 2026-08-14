@@ -51,7 +51,12 @@ def _parse_vmess(value: str) -> tuple[str, int] | None:
 
 
 def _parse_standard(value: str) -> tuple[str, int] | None:
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        # Public lists frequently contain redacted or otherwise malformed
+        # rows. One bad authority must not abort the whole source refresh.
+        return None
     try:
         port = parsed.port
     except ValueError:

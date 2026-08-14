@@ -1,4 +1,4 @@
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API = import.meta.env.VITE_API_URL || "/api";
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API}${path}`, {
@@ -15,4 +15,3 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
 }
 
 export { API };
-
