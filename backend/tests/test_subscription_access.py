@@ -8,9 +8,9 @@ from sqlalchemy.orm import sessionmaker
 from fastapi import HTTPException
 
 from app.database import Base
-from app.main import bot_delete_device, bot_rename_device, bot_rotate_device, bot_vpn_status, subscription
+from app.main import bot_delete_device, bot_rename_device, bot_restore_subscription, bot_rotate_device, bot_vpn_status, subscription
 from app.crypto import encrypt
-from app.models import Device, Node, NodeProbeState, NodeState, RetiredSubscription, Source, TelegramUser
+from app.models import Device, Node, NodeProbeState, NodeState, RetiredSubscription, Source, SubscriptionRestoration, TelegramUser
 from app.schemas import DeviceUpdate
 from app.security import hash_token
 from app.services.subgram import AccessDecision, Sponsor
@@ -143,3 +143,38 @@ class SubscriptionAccessTests(unittest.TestCase):
             self.assertTrue(result["deleted"])
             self.assertTrue(bot_vpn_status(1100, db)["can_restore"])
             self.assertEqual(db.query(Device).count(), 0)
+
+    def test_cutover_subscription_is_restored_once_with_a_new_working_device(self):
+        with self.Session() as db:
+            user = TelegramUser(telegram_id=1200, username="restore")
+            db.add(user); db.flush()
+            db.add(RetiredSubscription(
+                original_device_id=user.id,
+                user_id=user.id,
+                slot=2,
+                label="Старый телефон",
+                token_hash=hash_token("retired-restore-token"),
+                token_hint="retired",
+                reason="global_reissue",
+            ))
+            db.commit()
+            self.assertTrue(bot_vpn_status(1200, db)["can_restore"])
+
+            with patch("app.main.has_required_memberships", AsyncMock(return_value=True)), patch(
+                "app.main.get_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok")),
+            ):
+                restored = asyncio.run(bot_restore_subscription(1200, db))
+
+            self.assertEqual((restored.slot, restored.label), (2, "Старый телефон"))
+            self.assertIsNotNone(restored.subscription_url)
+            self.assertEqual(db.query(SubscriptionRestoration).count(), 1)
+            self.assertFalse(bot_vpn_status(1200, db)["can_restore"])
+
+            device = db.query(Device).one()
+            bot_delete_device(1200, device.id, db)
+            self.assertFalse(bot_vpn_status(1200, db)["can_restore"])
+            with patch("app.main.has_required_memberships", AsyncMock(return_value=True)), patch(
+                "app.main.get_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok")),
+            ), self.assertRaises(HTTPException) as raised:
+                asyncio.run(bot_restore_subscription(1200, db))
+            self.assertEqual(raised.exception.status_code, 409)

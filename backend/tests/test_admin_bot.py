@@ -422,5 +422,30 @@ class WorkerSchedulerTests(unittest.TestCase):
         engine.dispose()
 
 
+class SubscriptionRestoreButtonTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_shows_restore_button_to_eligible_previous_subscriber(self):
+        message = SimpleNamespace(answer=AsyncMock())
+        with patch.object(bot_module, "ensure_user", AsyncMock(return_value=1200)), patch.object(
+            bot_module, "allowed", AsyncMock(return_value={"allowed": True}),
+        ), patch.object(bot_module, "api", AsyncMock(side_effect=[{}, {"can_restore": True}])):
+            await bot_module.start(message)
+
+        markup = message.answer.await_args.kwargs["reply_markup"]
+        self.assertEqual(markup.inline_keyboard[0][0].text, "♻️ Возобновить подписку")
+        self.assertEqual(markup.inline_keyboard[0][0].callback_data, "vpn:restore")
+
+    async def test_restore_button_uses_dedicated_endpoint_and_returns_subscription(self):
+        callback = SimpleNamespace(answer=AsyncMock())
+        device = {"subscription_url": "https://zazavpn.ru/s/new-token", "slot": 1, "label": "Телефон"}
+        with patch.object(bot_module, "require_vpn_access", AsyncMock(return_value=1200)), patch.object(
+            bot_module, "api", AsyncMock(return_value=device),
+        ) as api, patch.object(bot_module, "send_subscription", AsyncMock()) as send:
+            await bot_module.restore_subscription(callback)
+
+        api.assert_awaited_once_with("POST", "/internal/users/1200/subscription/restore")
+        send.assert_awaited_once_with(callback, device)
+        callback.answer.assert_awaited_once_with("Подписка возобновлена")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -37,7 +37,9 @@ from app.services.analytics import daily_retention_cohorts, sequential_funnel
 from app.services.donations import (DonationError, complete_star_donation, create_star_donation, create_ton_session,
                                     donation_analytics, donation_by_public_token, donation_summary, prepare_ton_donation,
                                     public_ton_payload, validate_star_checkout, verify_pending_ton_donations)
-from app.services.subscriptions import archive_device_token, happ_retirement_payload, happ_sponsor_gate_payload, retire_device
+from app.services.subscriptions import (archive_device_token, happ_retirement_payload, happ_sponsor_gate_payload,
+                                        reconcile_existing_restorations, record_subscription_restoration, restoration_candidate,
+                                        retire_device, subscription_can_be_restored)
 
 settings = get_settings()
 
@@ -45,6 +47,7 @@ settings = get_settings()
 def bootstrap() -> None:
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
+        reconcile_existing_restorations(db)
         if engine.dialect.name == "postgresql":
             # Telegram IDs exceed signed 32-bit integers. Keep existing local installs usable.
             db.execute(text("ALTER TABLE telegram_users ALTER COLUMN telegram_id TYPE BIGINT"))
@@ -824,12 +827,54 @@ def bot_vpn_status(telegram_id: int, db: Session = Depends(get_db)) -> dict:
         "active_devices": active,
         "device_limit": 8,
         "retired_subscriptions": retired,
-        "can_restore": active == 0 and retired > 0,
+        "can_restore": subscription_can_be_restored(db, user.id, active),
         "last_subscription_open": last_used.isoformat() if last_used else None,
         "active_nodes": nodes,
         "average_ping": round(ping, 1) if ping else None,
         "access_status": "Subgram · проверка при выдаче VPN",
     }
+
+
+@app.post("/internal/users/{telegram_id}/subscription/restore", dependencies=[Depends(require_internal)], response_model=DeviceResponse)
+async def bot_restore_subscription(telegram_id: int, db: Session = Depends(get_db)) -> DeviceResponse:
+    user = db.scalar(select(TelegramUser).where(TelegramUser.telegram_id == telegram_id))
+    if not user or user.is_blocked:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    active = db.scalar(select(func.count()).select_from(Device).where(
+        Device.user_id == user.id, Device.is_revoked.is_(False)
+    )) or 0
+    if not subscription_can_be_restored(db, user.id, active):
+        raise HTTPException(status_code=409, detail="Подписка уже возобновлена или недоступна для восстановления")
+    if not await has_required_memberships(db, user):
+        raise HTTPException(status_code=403, detail="Подпишитесь на обязательные каналы")
+    access = await get_subgram_access(user.telegram_id, username=user.username)
+    if not access.allowed:
+        raise HTTPException(status_code=403, detail="Сначала подпишитесь на каналы партнёров через /start")
+    if access.status == "ok":
+        clear_webhook_blocks_after_live_check(db, user.telegram_id)
+    candidate = restoration_candidate(db, user.id)
+    if candidate is None:
+        raise HTTPException(status_code=409, detail="Архивная подписка не найдена")
+    token, token_hash, hint = generate_device_token()
+    device = Device(
+        user_id=user.id,
+        slot=candidate.slot if 1 <= candidate.slot <= 8 else 1,
+        label=candidate.label.strip()[:80] or "Основное устройство",
+        token_hash=token_hash,
+        token_hint=hint,
+    )
+    db.add(device)
+    db.flush()
+    record_subscription_restoration(db, user.id, device.id)
+    track_event(db, "subscription_restored", user_id=user.id, device_id=device.id)
+    track_event(db, "vpn_issued", user_id=user.id, device_id=device.id)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Подписка уже возобновлена") from exc
+    db.refresh(device)
+    return device_response(device, include_url=True, plain_token=token)
 
 
 @app.patch("/internal/users/{telegram_id}/devices/{device_id}", dependencies=[Depends(require_internal)], response_model=DeviceResponse)
@@ -898,6 +943,7 @@ async def bot_create_device(telegram_id: int, payload: DeviceCreate, db: Session
     existing = db.scalars(select(Device).where(Device.user_id == user.id, Device.is_revoked.is_(False))).all()
     if len(existing) >= 8:
         raise HTTPException(status_code=409, detail="Доступно не более 8 устройств")
+    consumes_cutover_restore = subscription_can_be_restored(db, user.id, len(existing))
     if not await has_required_memberships(db, user):
         raise HTTPException(status_code=403, detail="Подпишитесь на обязательные каналы")
     access = await get_subgram_access(user.telegram_id, username=user.username)
@@ -911,6 +957,9 @@ async def bot_create_device(telegram_id: int, payload: DeviceCreate, db: Session
     device = Device(user_id=user.id, slot=slot, label=payload.label, token_hash=token_hash, token_hint=hint)
     db.add(device)
     db.flush()
+    if consumes_cutover_restore:
+        record_subscription_restoration(db, user.id, device.id)
+        track_event(db, "subscription_restored", user_id=user.id, device_id=device.id)
     track_event(db, "vpn_issued", user_id=user.id, device_id=device.id)
     db.commit()
     db.refresh(device)

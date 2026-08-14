@@ -2,16 +2,17 @@ import base64
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Device, RetiredSubscription, SubscriptionCutover
+from app.models import Device, RetiredSubscription, SubscriptionCutover, SubscriptionRestoration
 
 
 BOT_DEEPLINK = "https://t.me/zazaaVPN_bot?start=reissue"
 GLOBAL_REISSUE_MESSAGE = "Подписка отключена. Перевыпусти её в @zazaaVPN_bot"
 SPONSOR_UNSUBSCRIBED_MESSAGE = "Ты отписался от спонсора. VPN отключён. Перейди в @zazaaVPN_bot и подпишись заново"
 SPONSOR_ACCESS_MESSAGE = "Подпишись на каналы партнёров в @zazaaVPN_bot и обнови подписку"
+RESTORE_CAMPAIGN_KEY = "sponsor-onboarding-v1"
 
 
 def retirement_message(reason: str) -> str:
@@ -84,6 +85,61 @@ def archive_device_token(db: Session, device: Device, reason: str) -> None:
         original_last_used_at=device.last_used_at,
     ))
     db.flush()
+
+
+def restoration_candidate(db: Session, user_id: UUID) -> RetiredSubscription | None:
+    return db.scalar(select(RetiredSubscription).where(
+        RetiredSubscription.user_id == user_id,
+        RetiredSubscription.reason == "global_reissue",
+    ).order_by(RetiredSubscription.original_last_used_at.desc().nullslast(), RetiredSubscription.retired_at.desc()))
+
+
+def subscription_can_be_restored(db: Session, user_id: UUID, active_devices: int | None = None) -> bool:
+    if active_devices is None:
+        active_devices = db.scalar(select(func.count()).select_from(Device).where(
+            Device.user_id == user_id, Device.is_revoked.is_(False)
+        )) or 0
+    if active_devices:
+        return False
+    restored = db.scalar(select(SubscriptionRestoration.id).where(
+        SubscriptionRestoration.user_id == user_id,
+        SubscriptionRestoration.campaign_key == RESTORE_CAMPAIGN_KEY,
+    ))
+    return restored is None and restoration_candidate(db, user_id) is not None
+
+
+def record_subscription_restoration(db: Session, user_id: UUID, device_id: UUID) -> SubscriptionRestoration:
+    item = SubscriptionRestoration(
+        user_id=user_id,
+        device_id=device_id,
+        campaign_key=RESTORE_CAMPAIGN_KEY,
+    )
+    db.add(item)
+    db.flush()
+    return item
+
+
+def reconcile_existing_restorations(db: Session) -> int:
+    """Mark users who already created a device after the historical cutover."""
+    eligible = set(db.scalars(select(RetiredSubscription.user_id).where(
+        RetiredSubscription.reason == "global_reissue"
+    )).all())
+    active: dict[UUID, UUID] = {}
+    if eligible:
+        for device in db.scalars(select(Device).where(
+            Device.is_revoked.is_(False), Device.user_id.in_(eligible)
+        ).order_by(Device.created_at)).all():
+            active.setdefault(device.user_id, device.id)
+    existing = set(db.scalars(select(SubscriptionRestoration.user_id).where(
+        SubscriptionRestoration.campaign_key == RESTORE_CAMPAIGN_KEY,
+        SubscriptionRestoration.user_id.in_(active),
+    )).all()) if active else set()
+    for user_id, device_id in active.items():
+        if user_id not in existing:
+            record_subscription_restoration(db, user_id, device_id)
+    if active.keys() - existing:
+        db.commit()
+    return len(active.keys() - existing)
 
 
 def run_global_cutover(db: Session, cutover_key: str = "sponsor-onboarding-v1") -> SubscriptionCutover:

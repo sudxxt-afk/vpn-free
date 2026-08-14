@@ -463,7 +463,7 @@ async def start(message: Message) -> None:
     vpn_status = await api("GET", f"/internal/users/{telegram_id}/vpn-status")
     if vpn_status.get("can_restore"):
         restore_markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="♻️ Перевыпустить отключённую подписку", callback_data="vpn:restore")],
+            [InlineKeyboardButton(text="♻️ Возобновить подписку", callback_data="vpn:restore")],
             *menu().inline_keyboard,
         ])
         await message.answer(
@@ -979,7 +979,7 @@ async def show_devices(callback: CallbackQuery) -> None:
     if len(devices) < 8:
         rows.append([InlineKeyboardButton(text="➕ Добавить устройство", callback_data="vpn:add")])
     if status.get("can_restore"):
-        rows.append([InlineKeyboardButton(text="♻️ Восстановить VPN", callback_data="vpn:restore")])
+        rows.append([InlineKeyboardButton(text="♻️ Возобновить подписку", callback_data="vpn:restore")])
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="vpn:home")])
     last_open = status.get("last_subscription_open")
     await edit_callback_screen(
@@ -1005,7 +1005,7 @@ async def vpn_home(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@dp.callback_query(F.data.in_({"vpn:add", "vpn:restore"}))
+@dp.callback_query(F.data == "vpn:add")
 async def add_device(callback: CallbackQuery) -> None:
     telegram_id = await require_vpn_access(callback)
     if telegram_id is None:
@@ -1014,10 +1014,23 @@ async def add_device(callback: CallbackQuery) -> None:
     if len(devices) >= 8:
         await callback.answer("Достигнут лимит 8 устройств", show_alert=True)
         return
-    label = "Основное устройство" if callback.data == "vpn:restore" else f"Устройство {len(devices) + 1}"
+    label = f"Устройство {len(devices) + 1}"
     device = await api("POST", f"/internal/users/{telegram_id}/devices", json={"label": label})
     await send_subscription(callback, device)
     await callback.answer()
+
+
+@dp.callback_query(F.data == "vpn:restore")
+async def restore_subscription(callback: CallbackQuery) -> None:
+    telegram_id = await require_vpn_access(callback)
+    if telegram_id is None:
+        return
+    try:
+        device = await api("POST", f"/internal/users/{telegram_id}/subscription/restore")
+        await send_subscription(callback, device)
+        await callback.answer("Подписка возобновлена")
+    except RuntimeError as exc:
+        await callback.answer(str(exc), show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("vpn:device:"))

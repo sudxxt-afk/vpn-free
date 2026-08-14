@@ -4,10 +4,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Device, RetiredSubscription, TelegramUser
+from app.models import Device, RetiredSubscription, SubscriptionRestoration, TelegramUser
 from app.security import hash_token
 from app.services.subscriptions import (SPONSOR_UNSUBSCRIBED_MESSAGE, happ_retirement_payload,
-                                        rollback_global_cutover, run_global_cutover)
+                                        reconcile_existing_restorations, rollback_global_cutover, run_global_cutover)
 
 
 class SubscriptionCutoverTests(unittest.TestCase):
@@ -45,6 +45,22 @@ class SubscriptionCutoverTests(unittest.TestCase):
         self.assertEqual(body, "")
         self.assertEqual(headers["support-url"], "https://t.me/zazaaVPN_bot?start=reissue")
         self.assertLessEqual(len(SPONSOR_UNSUBSCRIBED_MESSAGE), 200)
+
+    def test_existing_active_users_are_reconciled_once(self):
+        with self.Session() as db:
+            user = TelegramUser(telegram_id=1002)
+            db.add(user); db.flush()
+            device = Device(user_id=user.id, slot=1, label="New", token_hash=hash_token("new"), token_hint="new")
+            db.add(device); db.flush()
+            db.add(RetiredSubscription(
+                original_device_id=user.id, user_id=user.id, slot=1, label="Old",
+                token_hash=hash_token("old"), token_hint="old", reason="global_reissue",
+            ))
+            db.commit()
+
+            self.assertEqual(reconcile_existing_restorations(db), 1)
+            self.assertEqual(reconcile_existing_restorations(db), 0)
+            self.assertEqual(db.query(SubscriptionRestoration).count(), 1)
 
 
 if __name__ == "__main__":

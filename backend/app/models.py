@@ -91,6 +91,17 @@ class RetiredSubscription(Base):
     retired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class SubscriptionRestoration(Base):
+    """One-time restoration marker for a forced subscription cutover."""
+    __tablename__ = "subscription_restorations"
+    __table_args__ = (UniqueConstraint("user_id", "campaign_key", name="uq_subscription_restoration"),)
+    id: Mapped[uuid.UUID] = uuid_column()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("telegram_users.id", ondelete="CASCADE"), index=True)
+    device_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("devices.id", ondelete="SET NULL"), nullable=True)
+    campaign_key: Mapped[str] = mapped_column(String(80), index=True)
+    restored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Source(Base):
     __tablename__ = "sources"
     id: Mapped[uuid.UUID] = uuid_column()
