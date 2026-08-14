@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     subscription_max_per_host: int = 1
     membership_check_hours: int = 12
     subgram_api_key: str = ""
+    subgram_statistics_token: str = ""
+    subgram_statistics_bot_id: str = ""
     subgram_base_url: str = "https://api.subgram.org"
     subgram_max_sponsors: int = 3
     api_rate_limit_per_minute: int = 120

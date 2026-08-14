@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.bot import sponsor_gate_screen, start
-from app.services.subgram import get_subgram_access
+from app.services.subgram import get_subgram_access, get_subgram_statistics
 
 
 class SubgramTests(unittest.TestCase):
@@ -65,6 +65,59 @@ class SubgramTests(unittest.TestCase):
         ):
             result = asyncio.run(get_subgram_access(123))
         self.assertTrue(result.allowed)
+
+    def test_statistics_are_normalized_from_documented_response(self):
+        settings = SimpleNamespace(
+            subgram_statistics_token="statistics-token",
+            subgram_statistics_bot_id=123456,
+            subgram_base_url="https://api.subgram.org",
+        )
+        body = {
+            "status": "ok",
+            "message": "Статистика получена",
+            "data": {
+                "labels": ["13.08", "14.08"],
+                "subscribers_data": [2, "3"],
+                "value_data": [4.5, "7.50"],
+                "avg_price_data": [2.25, 2.5],
+                "total_subscribers": 5,
+                "total_value": 12,
+                "requests_stats": {"total_requests": 20, "successful_requests": 18},
+            },
+        }
+        request = AsyncMock(return_value=(200, body))
+        with patch("app.services.subgram.get_settings", return_value=settings), patch(
+            "app.services.subgram._statistics_request", request,
+        ):
+            result = asyncio.run(get_subgram_statistics(14))
+
+        self.assertTrue(result.available)
+        self.assertEqual((result.total_subscribers, result.total_revenue, result.average_price), (5, 12.0, 2.4))
+        self.assertEqual((result.total_requests, result.successful_requests), (20, 18))
+        self.assertEqual(result.days[1].subscribers, 3)
+        params = request.await_args.args[0]
+        self.assertEqual((params["action"], params["bot_id"], params["output_format"]), ("bots", 123456, "json"))
+
+    def test_statistics_report_missing_or_rejected_token_without_fake_zeroes(self):
+        missing = SimpleNamespace(subgram_statistics_token="", subgram_statistics_bot_id=None)
+        with patch("app.services.subgram.get_settings", return_value=missing):
+            result = asyncio.run(get_subgram_statistics())
+        self.assertFalse(result.configured)
+        self.assertFalse(result.available)
+
+        configured = SimpleNamespace(
+            subgram_statistics_token="wrong-token",
+            subgram_statistics_bot_id=None,
+            subgram_base_url="https://api.subgram.org",
+        )
+        with patch("app.services.subgram.get_settings", return_value=configured), patch(
+            "app.services.subgram._statistics_request",
+            AsyncMock(return_value=(401, {"status": "error", "message": "Невалидный API токен"})),
+        ):
+            rejected = asyncio.run(get_subgram_statistics())
+        self.assertTrue(rejected.configured)
+        self.assertFalse(rejected.available)
+        self.assertEqual(rejected.message, "Невалидный API токен")
 
     def test_sponsor_screen_has_no_manual_check_button(self):
         text, markup = sponsor_gate_screen({

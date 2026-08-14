@@ -250,6 +250,25 @@ class AnalyticsResponse(BaseModel):
     cohorts: list[AnalyticsCohortResponse]
 
 
+class SubgramStatisticsDayResponse(BaseModel):
+    label: str
+    subscribers: int
+    revenue: float
+    average_price: float
+
+
+class SubgramStatisticsResponse(BaseModel):
+    configured: bool
+    available: bool
+    message: str
+    total_subscribers: int
+    total_revenue: float
+    average_price: float
+    total_requests: int
+    successful_requests: int
+    days: list[SubgramStatisticsDayResponse]
+
+
 class StarDonationIntent(BaseModel):
     amount: int = Field(ge=1, le=10000)
 

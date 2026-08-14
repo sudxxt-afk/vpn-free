@@ -22,6 +22,8 @@ type PoolPolicy = { vless_reality_limit: number; vless_ws_limit: number; vless_o
 type AnalyticsDay = { date: string; bot_starts: number; site_visits: number; happ_launches: number; link_copies: number; setup_confirmed: number; vpn_issued: number; subscription_opens: number };
 type AnalyticsCohort = { date: string; users: number; d0: number | null; d1: number | null; d3: number | null; d7: number | null };
 type Analytics = { total_bot_users: number; new_bot_users: number; known_bot_blocks: number; active_users_1d: number; active_users_7d: number; active_users_30d: number; active_devices: number; funnel_bot_users: number; funnel_vpn_users: number; funnel_site_users: number; funnel_happ_users: number; funnel_subscription_users: number; bot_starts: number; unique_site_visitors: number; happ_launches: number; link_copies: number; setup_confirmed: number; vpn_issued: number; subscription_opens: number; donation_opens: number; donation_supporters: number; donation_stars_count: number; donation_stars_total: number; donation_ton_count: number; donation_ton_total: number; days: AnalyticsDay[]; cohorts: AnalyticsCohort[] };
+type SubgramStatisticsDay = { label: string; subscribers: number; revenue: number; average_price: number };
+type SubgramStatistics = { configured: boolean; available: boolean; message: string; total_subscribers: number; total_revenue: number; average_price: number; total_requests: number; successful_requests: number; days: SubgramStatisticsDay[] };
 type CurrentAdmin = { login: string; role: "owner" | "admin" | "viewer" };
 type Administrator = { id: string; login: string; role: "owner" | "admin" | "viewer"; is_active: boolean; telegram_id: number | null; telegram_username: string | null; support_enabled: boolean };
 
@@ -75,17 +77,18 @@ export function App() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [policy, setPolicy] = useState<PoolPolicy | null>(null);
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [subgramStatistics, setSubgramStatistics] = useState<SubgramStatistics | null>(null);
   const [notice, setNotice] = useState("");
   const [currentAdmin, setCurrentAdmin] = useState<CurrentAdmin | null>(null);
   const [administrators, setAdministrators] = useState<Administrator[]>([]);
 
   const refresh = useCallback(async () => {
     try {
-      const [me, summary, sourceList, nodeList, channelList, metricList, policyValue, analyticsValue] = await Promise.all([
-        request<CurrentAdmin>("/auth/me"), request<Dashboard>("/admin/dashboard"), request<Source[]>("/admin/sources"), request<Node[]>("/admin/nodes"), request<Channel[]>("/admin/channels"), request<Metric[]>("/admin/metrics"), request<PoolPolicy>("/admin/pool-policy"), request<Analytics>("/admin/analytics"),
+      const [me, summary, sourceList, nodeList, channelList, metricList, policyValue, analyticsValue, subgramValue] = await Promise.all([
+        request<CurrentAdmin>("/auth/me"), request<Dashboard>("/admin/dashboard"), request<Source[]>("/admin/sources"), request<Node[]>("/admin/nodes"), request<Channel[]>("/admin/channels"), request<Metric[]>("/admin/metrics"), request<PoolPolicy>("/admin/pool-policy"), request<Analytics>("/admin/analytics"), request<SubgramStatistics>("/admin/subgram-analytics"),
       ]);
       const administratorList = me.role === "owner" ? await request<Administrator[]>("/admin/administrators") : [];
-      setCurrentAdmin(me); setAdministrators(administratorList); setDashboard(summary); setSources(sourceList); setNodes(nodeList); setChannels(channelList); setMetrics(metricList); setPolicy(policyValue); setAnalytics(analyticsValue); setAuthenticated(true);
+      setCurrentAdmin(me); setAdministrators(administratorList); setDashboard(summary); setSources(sourceList); setNodes(nodeList); setChannels(channelList); setMetrics(metricList); setPolicy(policyValue); setAnalytics(analyticsValue); setSubgramStatistics(subgramValue); setAuthenticated(true);
     } catch { setAuthenticated(false); }
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
@@ -105,7 +108,7 @@ export function App() {
     <main className="content"><header><div className="headline"><button className="icon-button mobile-menu" aria-label="Открыть меню" onClick={() => setCompact(!compact)}><Menu size={20}/></button><div><p className="eyebrow">CONTROL / {page.toUpperCase()}</p><h1>{title}</h1></div></div><div className="header-actions"><button className="icon-button" aria-label="Обновить данные" onClick={() => { refresh(); notify("Данные обновлены"); }}><RefreshCw size={19}/></button><button className="icon-button" aria-label="Уведомления"><Bell size={19}/><i/></button><div className="avatar">A</div></div></header>
       {notice && <div className="toast" role="status"><Check size={17}/>{notice}</div>}
       {page === "overview" && <Overview dashboard={dashboard} metrics={metrics} sources={sources} nodes={nodes} setPage={setPage} />}
-      {page === "analytics" && <AnalyticsPage analytics={analytics} />}
+      {page === "analytics" && <AnalyticsPage analytics={analytics} subgram={subgramStatistics} />}
       {page === "sources" && <Sources sources={sources} onChanged={refresh} notify={notify} />}
       {page === "nodes" && <Nodes nodes={nodes} />}
       {page === "policy" && policy && <SubscriptionPolicy policy={policy} onChanged={refresh} notify={notify} />}
@@ -140,7 +143,18 @@ function SignalChart({ metrics }: { metrics: Metric[] }) {
   return <div className="signal-chart" aria-label="График успешности проверок нод"><div className="chart-glow"/><svg viewBox="0 0 600 180" preserveAspectRatio="none"><polyline points={points} fill="none" stroke="currentColor" strokeWidth="3"/></svg><div className="chart-labels"><span>{values[0]}%</span><span>успешность health-check</span><span>{values.at(-1)}%</span></div></div>;
 }
 
-function AnalyticsPage({ analytics }: { analytics: Analytics | null }) {
+function SubgramAnalyticsPanel({ value }: { value: SubgramStatistics | null }) {
+  if (!value) return <article className="panel"><div className="empty"><p>Загрузка статистики Subgram…</p></div></article>;
+  if (!value.available) return <article className="panel subgram-panel unavailable"><div className="panel-head"><div><p className="eyebrow">SUBGRAM MONETIZATION</p><h3>Доход от спонсорских заданий</h3></div><span className="status-dot warning">НЕ ПОДКЛЮЧЕНО</span></div><div className="subgram-notice"><CircleAlert size={20}/><div><strong>{value.configured ? "Subgram отклонил запрос статистики" : "Нужен отдельный API Token"}</strong><p>{value.message}</p></div></div></article>;
+  const money = (amount: number) => new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 2 }).format(amount);
+  const successRate = value.total_requests ? Math.round(value.successful_requests * 1000 / value.total_requests) / 10 : 0;
+  return <article className="panel subgram-panel"><div className="panel-head"><div><p className="eyebrow">SUBGRAM MONETIZATION</p><h3>Доход от спонсорских заданий</h3></div><span className="status-dot">LIVE API · 14 ДНЕЙ</span></div>
+    <div className="donation-grid"><div><small>Засчитано подписок</small><strong>{value.total_subscribers}</strong><span>по данным Subgram</span></div><div><small>Доход</small><strong>{money(value.total_revenue)}</strong><span>за выбранный период</span></div><div><small>Средняя цена</small><strong>{money(value.average_price)}</strong><span>за одну подписку</span></div><div><small>Успешные API-запросы</small><strong>{value.successful_requests} / {value.total_requests}</strong><span>{successRate}% успешных</span></div></div>
+    <div className="table-wrap subgram-table"><table><thead><tr><th>Дата</th><th>Подписки</th><th>Доход</th><th>Средняя цена</th></tr></thead><tbody>{value.days.map((day) => <tr key={day.label}><td><strong>{day.label}</strong></td><td>{day.subscribers}</td><td>{money(day.revenue)}</td><td>{money(day.average_price)}</td></tr>)}</tbody></table>{value.days.length === 0 && <div className="empty"><p>За выбранный период Subgram не вернул дневных данных.</p></div>}</div>
+  </article>;
+}
+
+function AnalyticsPage({ analytics, subgram }: { analytics: Analytics | null; subgram: SubgramStatistics | null }) {
   if (!analytics) return <section className="page-stack"><div className="empty"><p>Загрузка аналитики…</p></div></section>;
   const cards = [
     ["Пользователи бота", analytics.total_bot_users, "уникальные Telegram-аккаунты", Users, "violet"],
@@ -161,7 +175,7 @@ function AnalyticsPage({ analytics }: { analytics: Analytics | null }) {
   ] as const;
   const retention = (value: number | null) => value === null ? "—" : `${value}%`;
   const donationConversion = analytics.donation_opens ? Math.round(analytics.donation_supporters * 1000 / analytics.donation_opens) / 10 : 0;
-  return <section className="page-stack"><div className="page-intro"><div><p className="eyebrow">PRODUCT ANALYTICS</p><h2>Бот и подключение</h2><p>События без хранения ссылок подписки: старты бота, переходы на сайт, импорт в HAPP и выдачи VPN.</p></div><span className="status-dot">14 ДНЕЙ</span></div>
+  return <section className="page-stack"><SubgramAnalyticsPanel value={subgram}/><div className="page-intro"><div><p className="eyebrow">PRODUCT ANALYTICS</p><h2>Бот и подключение</h2><p>События без хранения ссылок подписки: старты бота, переходы на сайт, импорт в HAPP и выдачи VPN.</p></div><span className="status-dot">14 ДНЕЙ</span></div>
     <div className="metric-grid">{cards.map(([label, value, description, Icon, tone]) => <article className="metric-card" key={label}><div className={`metric-icon ${tone}`}><Icon size={20}/></div><p>{label}</p><strong>{value}</strong><span>{description}</span></article>)}</div>
     <article className="panel analytics-panel"><div className="panel-head"><div><p className="eyebrow">FUNNEL BY DAY</p><h3>Активность пользователей</h3></div><div className="analytics-legend"><span><i className="dot violet"/>бот</span><span><i className="dot blue"/>сайт</span><span><i className="dot mint"/>HAPP</span></div></div><div className="analytics-bars">{analytics.days.map((day) => <div className="analytics-day" key={day.date}><div className="bar-stack" title={`${day.date}: бот ${day.bot_starts}, сайт ${day.site_visits}, HAPP ${day.happ_launches}`}><i className="bar bot" style={{ height: `${(day.bot_starts / max) * 100}%` }}/><i className="bar site" style={{ height: `${(day.site_visits / max) * 100}%` }}/><i className="bar happ" style={{ height: `${(day.happ_launches / max) * 100}%` }}/></div><small>{new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(new Date(`${day.date}T00:00:00Z`))}</small></div>)}</div></article>
     <article className="panel"><div className="panel-head"><div><p className="eyebrow">CONVERSION FUNNEL</p><h3>/start → VPN → страница → импорт → использование</h3></div><span className="muted">последовательные уникальные пользователи</span></div><div className="funnel-grid">{funnel.map(([label, value], index) => { const conversion = index === 0 ? 100 : (funnel[index - 1][1] ? Math.round(value * 1000 / funnel[index - 1][1]) / 10 : 0); return <div className="funnel-step" key={label}><small>{label}</small><strong>{value}</strong><span>{index === 0 ? "точка входа" : `${conversion}% от прошлого шага`}</span></div>; })}</div></article>

@@ -21,13 +21,14 @@ from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLooku
                          DeviceCreate, DeviceResponse, DeviceUpdate, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
                          AnalyticsCohortResponse, AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
                          NodeProbeAttemptResponse, NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, StarDonationComplete,
-                         StarDonationIntent, StarDonationPreCheckout, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
+                         StarDonationIntent, StarDonationPreCheckout, SubgramStatisticsDayResponse, SubgramStatisticsResponse,
+                         SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_github_url, refresh_source
 from app.services.parser import address_diversity_key, classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.health import verified_pool_conditions
 from app.services.telegram import has_required_memberships, validate_bot_admin
-from app.services.subgram import get_subgram_access
+from app.services.subgram import get_subgram_access, get_subgram_statistics
 from app.services.rate_limit import is_allowed
 from app.services.telegram_html import sanitize_telegram_html
 from app.services.analytics import daily_retention_cohorts, sequential_funnel
@@ -344,6 +345,23 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
         **donation_totals,
         days=[AnalyticsDayResponse(date=date, **values) for date, values in points.items()],
         cohorts=[AnalyticsCohortResponse(**item) for item in cohorts],
+    )
+
+
+@app.get("/admin/subgram-analytics", response_model=SubgramStatisticsResponse)
+async def subgram_analytics(request: Request, days: int = 14) -> SubgramStatisticsResponse:
+    require_admin(request)
+    statistics = await get_subgram_statistics(max(1, min(days, 90)))
+    return SubgramStatisticsResponse(
+        configured=statistics.configured,
+        available=statistics.available,
+        message=statistics.message,
+        total_subscribers=statistics.total_subscribers,
+        total_revenue=statistics.total_revenue,
+        average_price=statistics.average_price,
+        total_requests=statistics.total_requests,
+        successful_requests=statistics.successful_requests,
+        days=[SubgramStatisticsDayResponse(**point.__dict__) for point in statistics.days],
     )
 
 
