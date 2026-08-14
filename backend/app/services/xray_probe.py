@@ -282,17 +282,21 @@ def probe_config(
             return ProbeResult(False, "xray", True, False, error=error, failure_class="probe_infrastructure")
 
         successes = 0
+        attempts = 0
         latencies: list[float] = []
         errors: list[str] = []
         proxy = f"socks5://127.0.0.1:{port}"
         with httpx.Client(proxy=proxy, timeout=timeout_seconds, follow_redirects=True) as client:
             for index, url in enumerate(urls):
+                attempts = index + 1
                 started = time.perf_counter()
                 try:
                     response = client.get(url, headers={"User-Agent": "ZazaVPN-Health/1.0"})
                     response.raise_for_status()
                     successes += 1
                     latencies.append((time.perf_counter() - started) * 1000)
+                    if successes >= required_successes:
+                        break
                 except httpx.HTTPError as exc:
                     errors.append(f"{urlsplit(url).hostname}: {type(exc).__name__}")
                 remaining = len(urls) - index - 1
@@ -301,14 +305,14 @@ def probe_config(
 
             if successes < required_successes:
                 return ProbeResult(
-                    False, "http", True, True, successes, index + 1,
+                    False, "http", True, True, successes, attempts,
                     round(sum(latencies) / len(latencies), 2) if latencies else None,
                     error="; ".join(errors)[:500] or "not enough successful HTTP probes", failure_class="network",
                 )
 
             if not speed_url:
                 return ProbeResult(
-                    True, "passed", True, True, successes, len(urls),
+                    True, "passed", True, True, successes, attempts,
                     round(sum(latencies) / len(latencies), 2), None, None, "passed",
                 )
 
@@ -320,18 +324,18 @@ def probe_config(
                 throughput = len(speed_response.content) * 8 / elapsed / 1000
             except httpx.HTTPError as exc:
                 return ProbeResult(
-                    False, "throughput", True, True, successes, len(urls),
+                    False, "throughput", True, True, successes, attempts,
                     round(sum(latencies) / len(latencies), 2), error=f"speed probe: {type(exc).__name__}", failure_class="network",
                 )
         if throughput < min_speed_kbps:
             return ProbeResult(
-                False, "throughput", True, True, successes, len(urls),
+                False, "throughput", True, True, successes, attempts,
                 round(sum(latencies) / len(latencies), 2), round(throughput, 2),
                 f"speed {throughput:.0f} Kbit/s below {min_speed_kbps:.0f}",
                 "network",
             )
         return ProbeResult(
-            True, "passed", True, True, successes, len(urls),
+            True, "passed", True, True, successes, attempts,
             round(sum(latencies) / len(latencies), 2), round(throughput, 2), None,
         )
     except (OSError, ValueError) as exc:

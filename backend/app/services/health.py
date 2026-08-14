@@ -173,6 +173,7 @@ def _selected_nodes(db: Session, priority_node_ids: list[UUID] | None = None) ->
         return priority
 
     retry_before = datetime.now(timezone.utc) - timedelta(seconds=settings.health_retry_seconds)
+    confirmation_limit = min(remaining, max(1, settings.health_probe_batch_size * 2 // 3))
     retry_query = (
         select(Node.id, Node.config_ciphertext)
         .join(Source, Source.id == Node.source_id)
@@ -181,9 +182,12 @@ def _selected_nodes(db: Session, priority_node_ids: list[UUID] | None = None) ->
             Source.is_enabled.is_(True),
             Node.state != NodeState.REMOVED,
             NodeProbeState.last_checked_at < retry_before,
-            or_(NodeProbeState.stage == "retrying", and_(Node.state == NodeState.DEGRADED, Node.success_checks == 1)),
+            or_(
+                NodeProbeState.stage == "retrying",
+                and_(NodeProbeState.stage == "passed", Node.state.in_([NodeState.CANDIDATE, NodeState.DEGRADED])),
+            ),
         )
-        .order_by(NodeProbeState.last_checked_at.asc()).limit(min(remaining, settings.health_probe_batch_size // 3))
+        .order_by(NodeProbeState.last_checked_at.asc()).limit(confirmation_limit)
     )
     if selected_ids:
         retry_query = retry_query.where(Node.id.not_in(selected_ids))
@@ -232,7 +236,10 @@ def retry_node_ids(db: Session, limit: int | None = None) -> list[UUID]:
         .where(
             Source.is_enabled.is_(True), Node.state != NodeState.REMOVED,
             NodeProbeState.last_checked_at < retry_before,
-            or_(NodeProbeState.stage == "retrying", and_(Node.state == NodeState.DEGRADED, Node.success_checks == 1)),
+            or_(
+                NodeProbeState.stage == "retrying",
+                and_(NodeProbeState.stage == "passed", Node.state.in_([NodeState.CANDIDATE, NodeState.DEGRADED])),
+            ),
         )
         .order_by(NodeProbeState.last_checked_at.asc()).limit(limit or max(2, settings.health_probe_batch_size // 3))
     ).all()

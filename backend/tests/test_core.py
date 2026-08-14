@@ -155,6 +155,26 @@ class XrayProbeTests(unittest.TestCase):
             self.assertNotIn(ignored.id, [node_id for node_id, _ in selected])
         engine.dispose()
 
+    def test_passed_candidate_is_prioritized_for_confirmation(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            source = Source(name="source", github_url="https://github.com/a/source", raw_url="https://raw.githubusercontent.com/a/source/main/list")
+            db.add(source); db.flush()
+            fresh = Node(source_id=source.id, fingerprint="4" * 64, protocol="vless", host="8.8.8.8", port=443,
+                         config_ciphertext="fresh", state=NodeState.CANDIDATE)
+            confirmed = Node(source_id=source.id, fingerprint="5" * 64, protocol="vless", host="8.8.4.4", port=443,
+                             config_ciphertext="confirmed", state=NodeState.DEGRADED, success_checks=5)
+            db.add_all([fresh, confirmed]); db.flush()
+            db.add(NodeProbeState(node_id=confirmed.id, stage="passed", static_valid=True, xray_started=True,
+                                  last_checked_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+                                  last_success_at=datetime.now(timezone.utc) - timedelta(minutes=2)))
+            db.commit()
+            selected = _selected_nodes(db)
+            self.assertEqual(selected[0][0], confirmed.id)
+        engine.dispose()
+
     def test_unchecked_backlog_prefers_the_more_reliable_source(self):
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)

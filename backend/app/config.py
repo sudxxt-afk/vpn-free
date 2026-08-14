@@ -20,10 +20,10 @@ class Settings(BaseSettings):
     backend_internal_url: str = "http://api:8000"
     frontend_origin: str = "http://localhost:5173"
     source_refresh_minutes: int = 20
-    health_check_minutes: int = 10
-    health_probe_batch_size: int = 60
+    health_check_minutes: int = 3
+    health_probe_batch_size: int = 100
     health_probe_concurrency: int = 3
-    health_probe_timeout_seconds: float = 6.0
+    health_probe_timeout_seconds: float = 4.0
     health_probe_fresh_minutes: int = 45
     health_failure_grace_minutes: int = 15
     health_retry_seconds: int = 75
@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     health_probe_history_days: int = 14
     health_probe_speed_fresh_hours: int = 6
     health_probe_urls: str = "https://cp.cloudflare.com/generate_204,https://www.gstatic.com/generate_204,https://connectivitycheck.platform.hicloud.com/generate_204"
-    health_probe_required_successes: int = 2
-    health_probe_speed_url: str = "https://speed.cloudflare.com/__down?bytes=1048576"
+    health_probe_required_successes: int = 1
+    health_probe_speed_url: str = "https://speed.cloudflare.com/__down?bytes=262144"
     health_probe_min_speed_kbps: float = 128.0
     health_scheduler_jitter_seconds: int = 60
     source_scheduler_jitter_seconds: int = 120
