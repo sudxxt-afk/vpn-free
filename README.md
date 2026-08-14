@@ -33,7 +33,7 @@ VLESS, Shadowsocks, Trojan, VMess, Hysteria2 and TUIC.
 ## Schedules
 
 - GitHub source refresh: every 40 minutes.
-- Active-node health checks: every 3 minutes by default. A node is published only after two independent successful checks.
+- Active-node health checks: every 2 minutes by default. A node is published only after two independent successful Xray-backed HTTP checks; speed affects ranking, not availability.
 - Telegram membership revalidation: every 12 hours.
 
 ## Telegram operator panel

@@ -261,6 +261,7 @@ class XrayProbeTests(unittest.TestCase):
         with Session() as db:
             source = Source(name="test", github_url="https://github.com/a/b", raw_url="https://raw.githubusercontent.com/a/b/main/list")
             db.add(source); db.flush()
+            db.add(SourceQuality(source_id=source.id, checked_nodes=10, passed_nodes=0, pass_rate=0.0))
             node = Node(
                 id=uuid4(), source_id=source.id, fingerprint="a" * 64,
                 protocol="vless", host="8.8.8.8", port=443, config_ciphertext="unused",
@@ -269,7 +270,7 @@ class XrayProbeTests(unittest.TestCase):
             db.add(node); db.flush()
             apply_probe_result(db, node, ProbeResult(
                 True, "passed", True, True, http_successes=2, http_attempts=3,
-                latency_ms=120.0, throughput_kbps=500.0,
+                latency_ms=1500.0, throughput_kbps=0.0,
             ))
             db.flush()
             probe = db.get(NodeProbeState, node.id)
@@ -279,7 +280,7 @@ class XrayProbeTests(unittest.TestCase):
             db.flush()
             apply_probe_result(db, node, ProbeResult(
                 True, "passed", True, True, http_successes=2, http_attempts=3,
-                latency_ms=120.0, throughput_kbps=500.0,
+                latency_ms=1500.0, throughput_kbps=0.0,
             ))
             db.flush()
             self.assertEqual((node.state, node.success_checks, probe.stage), (NodeState.ACTIVE, 2, "passed"))

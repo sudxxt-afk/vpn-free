@@ -324,15 +324,16 @@ def probe_config(
                 throughput = len(speed_response.content) * 8 / elapsed / 1000
             except httpx.HTTPError as exc:
                 return ProbeResult(
-                    False, "throughput", True, True, successes, attempts,
-                    round(sum(latencies) / len(latencies), 2), error=f"speed probe: {type(exc).__name__}", failure_class="network",
+                    True, "passed", True, True, successes, attempts,
+                    round(sum(latencies) / len(latencies), 2), 0.0,
+                    error=f"speed probe: {type(exc).__name__}", failure_class="passed",
                 )
         if throughput < min_speed_kbps:
             return ProbeResult(
-                False, "throughput", True, True, successes, attempts,
+                True, "passed", True, True, successes, attempts,
                 round(sum(latencies) / len(latencies), 2), round(throughput, 2),
                 f"speed {throughput:.0f} Kbit/s below {min_speed_kbps:.0f}",
-                "network",
+                "passed",
             )
         return ProbeResult(
             True, "passed", True, True, successes, attempts,

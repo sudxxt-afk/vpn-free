@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     backend_internal_url: str = "http://api:8000"
     frontend_origin: str = "http://localhost:5173"
     source_refresh_minutes: int = 20
-    health_check_minutes: int = 3
-    health_probe_batch_size: int = 100
+    health_check_minutes: int = 2
+    health_probe_batch_size: int = 80
     health_probe_concurrency: int = 3
     health_probe_timeout_seconds: float = 4.0
     health_probe_fresh_minutes: int = 45

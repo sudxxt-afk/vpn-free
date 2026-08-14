@@ -325,7 +325,13 @@ def apply_probe_result(db: Session, node: Node, result: ProbeResult) -> None:
         node.avg_latency_ms = result.latency_ms if node.avg_latency_ms is None else round(node.avg_latency_ms * 0.7 + (result.latency_ms or node.avg_latency_ms) * 0.3, 2)
         refresh_state(node, state.throughput_kbps, source_pass_rate)
         previous_pass_is_independent = previous_success and previous_success <= now - timedelta(seconds=settings.health_min_pass_interval_seconds)
-        if not _has_temporal_passes(db, node.id, now) and not (was_active and previous_pass_is_independent):
+        independently_verified = _has_temporal_passes(db, node.id, now) or (was_active and previous_pass_is_independent)
+        if independently_verified:
+            # Availability is established by two independent Xray-backed HTTP
+            # checks. Score still ranks nodes, but must not hide a working node
+            # merely because its source is noisy or its speed sample is low.
+            node.state = NodeState.ACTIVE
+        else:
             node.state = NodeState.DEGRADED
         return
 
