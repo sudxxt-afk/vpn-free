@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     subgram_statistics_bot_id: str = ""
     subgram_base_url: str = "https://api.subgram.org"
     subgram_max_sponsors: int = 3
+    subgram_recheck_hours: int = 24
     api_rate_limit_per_minute: int = 120
     subscription_rate_limit_per_minute: int = 20
     login_rate_limit_per_15_minutes: int = 10

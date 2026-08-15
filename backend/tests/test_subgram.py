@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.bot import sponsor_gate_screen, start
-from app.services.subgram import get_subgram_access, get_subgram_statistics
+from app.services.subgram import get_subgram_access, get_subgram_statistics, get_subgram_subscriptions
 
 
 class SubgramTests(unittest.TestCase):
@@ -23,7 +23,7 @@ class SubgramTests(unittest.TestCase):
             "message": "Нужна подписка",
             "total_fixed_link": 2,
             "additional": {"sponsors": [
-                {"resource_id": "1", "link": "https://t.me/first", "resource_name": "Первый канал", "button_text": "Подписаться", "type": "channel", "status": "unsubscribed", "available_now": True},
+                {"ads_id": "41", "resource_id": "1", "link": "https://t.me/first", "resource_name": "Первый канал", "button_text": "Подписаться", "type": "channel", "status": "unsubscribed", "available_now": True},
                 {"resource_id": "2", "link": "https://t.me/done", "resource_name": "Готово", "status": "subscribed", "available_now": True},
                 {"resource_id": "3", "link": "https://t.me/stopped", "resource_name": "Стоп", "status": "unsubscribed", "available_now": False},
             ]},
@@ -35,6 +35,7 @@ class SubgramTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertEqual([item.link for item in result.sponsors], ["https://t.me/first"])
         self.assertEqual(result.sponsor_total, 2)
+        self.assertEqual(result.ads_ids, (41,))
         payload = request.await_args.args[0]
         self.assertEqual(payload, {
             "user_id": 123,
@@ -104,6 +105,20 @@ class SubgramTests(unittest.TestCase):
         self.assertEqual(result.days[1].subscribers, 3)
         params = request.await_args.args[0]
         self.assertEqual((params["action"], params["bot_id"], params["output_format"]), ("bots", 123456, "json"))
+
+    def test_existing_subscription_recheck_does_not_request_new_sponsors(self):
+        body = {"status": "ok", "additional": {"sponsors": [
+            {"ads_id": "41", "status": "subscribed"},
+            {"ads_id": 42, "status": "unsubscribed"},
+        ]}}
+        request = AsyncMock(return_value=(200, body))
+        with patch("app.services.subgram.get_settings", return_value=self.settings), patch(
+            "app.services.subgram._subscriptions_request", request,
+        ):
+            result = asyncio.run(get_subgram_subscriptions(123, (41, 42)))
+        self.assertTrue(result.available)
+        self.assertEqual(result.statuses, ((41, "subscribed"), (42, "unsubscribed")))
+        self.assertEqual(request.await_args.args[0], {"user_id": 123, "ads_ids": [41, 42]})
 
     def test_statistics_report_missing_or_rejected_token_without_fake_zeroes(self):
         missing = SimpleNamespace(subgram_statistics_token="", subgram_statistics_bot_id=None)

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import SubgramSponsorState, SubgramWebhookEvent, TelegramUser
 from app.schemas import SubgramWebhookEventPayload
+from app.services.subgram_access import sync_access_blocks_from_webhooks
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,8 @@ def process_webhooks(db: Session, items: list[SubgramWebhookEventPayload]) -> We
                 latest_webhook_id=item.webhook_id,
             ))
         processed += 1
+    db.flush()
+    sync_access_blocks_from_webhooks(db, {item.user_id for item in ordered})
     return WebhookResult(len(items), processed, duplicates, stale)
 
 

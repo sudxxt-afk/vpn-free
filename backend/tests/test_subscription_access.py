@@ -41,13 +41,13 @@ class SubscriptionAccessTests(unittest.TestCase):
             db.commit()
 
             denied = AccessDecision(False, "warning", (Sponsor("https://t.me/sponsor"),), 1)
-            with patch("app.main.get_subgram_access", AsyncMock(return_value=denied)) as subgram:
+            with patch("app.main.resolve_subgram_access", AsyncMock(return_value=denied)) as subgram:
                 response = asyncio.run(subscription(token, db))
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.body, b"")
             self.assertIn("start=sponsors", response.headers["support-url"])
-            subgram.assert_awaited_once_with(1001, username="tester")
+            subgram.assert_awaited_once()
 
     def test_subscription_marks_dedicated_auto_routes_for_happ_network_filter(self):
         with self.Session() as db:
@@ -79,7 +79,7 @@ class SubscriptionAccessTests(unittest.TestCase):
                 ))
             db.commit()
 
-            with patch("app.main.get_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok"))):
+            with patch("app.main.resolve_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok"))):
                 response = asyncio.run(subscription(token, db))
 
             body = response.body.decode()
@@ -133,7 +133,7 @@ class SubscriptionAccessTests(unittest.TestCase):
             renamed = bot_rename_device(1100, device.id, DeviceUpdate(label="Laptop"), db)
             self.assertEqual(renamed.label, "Laptop")
 
-            with patch("app.main.get_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok"))):
+            with patch("app.main.resolve_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok"))):
                 rotated = asyncio.run(bot_rotate_device(1100, device.id, db))
             self.assertIsNotNone(rotated.subscription_url)
             self.assertEqual(db.query(RetiredSubscription).count(), 2)
@@ -161,7 +161,7 @@ class SubscriptionAccessTests(unittest.TestCase):
             self.assertTrue(bot_vpn_status(1200, db)["can_restore"])
 
             with patch("app.main.has_required_memberships", AsyncMock(return_value=True)), patch(
-                "app.main.get_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok")),
+                "app.main.resolve_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok")),
             ):
                 restored = asyncio.run(bot_restore_subscription(1200, db))
 
@@ -174,7 +174,7 @@ class SubscriptionAccessTests(unittest.TestCase):
             bot_delete_device(1200, device.id, db)
             self.assertFalse(bot_vpn_status(1200, db)["can_restore"])
             with patch("app.main.has_required_memberships", AsyncMock(return_value=True)), patch(
-                "app.main.get_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok")),
+                "app.main.resolve_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok")),
             ), self.assertRaises(HTTPException) as raised:
                 asyncio.run(bot_restore_subscription(1200, db))
             self.assertEqual(raised.exception.status_code, 409)

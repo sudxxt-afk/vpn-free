@@ -27,6 +27,13 @@ class AccessDecision:
     sponsors: tuple[Sponsor, ...] = ()
     sponsor_total: int = 0
     reason: str | None = None
+    ads_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class SubscriptionReview:
+    available: bool
+    statuses: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -90,6 +97,23 @@ def _sponsors(body: dict) -> tuple[Sponsor, ...]:
     return ()
 
 
+def _ads_ids(body: dict) -> tuple[int, ...]:
+    additional = body.get("additional")
+    items = additional.get("sponsors") if isinstance(additional, dict) else None
+    result: list[int] = []
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                ads_id = int(item.get("ads_id"))
+            except (TypeError, ValueError):
+                continue
+            if ads_id > 0 and ads_id not in result:
+                result.append(ads_id)
+    return tuple(result)
+
+
 async def _request(payload: dict) -> tuple[int, dict]:
     settings = get_settings()
     async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3)) as client:
@@ -109,6 +133,21 @@ async def _statistics_request(params: dict) -> tuple[int, dict]:
     settings = get_settings()
     async with httpx.AsyncClient(timeout=httpx.Timeout(12, connect=3)) as client:
         response = await client.get(f"{settings.subgram_base_url.rstrip('/')}/statistic", params=params)
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    return response.status_code, body if isinstance(body, dict) else {}
+
+
+async def _subscriptions_request(payload: dict) -> tuple[int, dict]:
+    settings = get_settings()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3)) as client:
+        response = await client.post(
+            f"{settings.subgram_base_url.rstrip('/')}/get-user-subscriptions",
+            headers={"Auth": settings.subgram_api_key, "Content-Type": "application/json"},
+            json=payload,
+        )
     try:
         body = response.json()
     except ValueError:
@@ -145,6 +184,7 @@ async def get_subgram_access(
         return AccessDecision(False, "error", reason="Subgram временно недоступен. Попробуйте снова через минуту.")
 
     status = body.get("status")
+    ads_ids = _ads_ids(body)
     if status == "warning":
         sponsors = _sponsors(body)
         if sponsors:
@@ -156,14 +196,45 @@ async def get_subgram_access(
                 sponsors=sponsors,
                 sponsor_total=max(sponsor_total, len(sponsors)),
                 reason=_safe_text(body.get("message"), "Нужна подписка на каналы партнёров", 300),
+                ads_ids=ads_ids,
             )
         logger.warning("Subgram returned warning without displayable sponsors; denying access")
         return AccessDecision(False, "error", reason="Subgram не вернул доступные задания. Попробуйте снова через минуту.")
     if status == "ok":
-        return AccessDecision(True, "ok", reason=_safe_text(body.get("message"), "Доступ подтверждён", 300))
+        return AccessDecision(True, "ok", reason=_safe_text(body.get("message"), "Доступ подтверждён", 300), ads_ids=ads_ids)
 
     logger.warning("Subgram returned status=%r http=%s; denying access", status, status_code)
     return AccessDecision(False, "error", reason=_safe_text(body.get("message"), "Ошибка проверки Subgram. Попробуйте позже.", 300))
+
+
+async def get_subgram_subscriptions(user_id: int, ads_ids: tuple[int, ...]) -> SubscriptionReview:
+    """Recheck already assigned sponsors without requesting a new task set."""
+    settings = get_settings()
+    if not settings.subgram_api_key or not ads_ids:
+        return SubscriptionReview(False)
+    try:
+        status_code, body = await _subscriptions_request({"user_id": user_id, "ads_ids": list(ads_ids)})
+    except httpx.HTTPError as exc:
+        logger.warning("Subgram subscription recheck failed: %s", exc.__class__.__name__)
+        return SubscriptionReview(False)
+    if status_code != 200 or body.get("status") != "ok":
+        logger.warning("Subgram subscription recheck rejected http=%s status=%r", status_code, body.get("status"))
+        return SubscriptionReview(False)
+    additional = body.get("additional")
+    items = additional.get("sponsors") if isinstance(additional, dict) else None
+    statuses: list[tuple[int, str]] = []
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                ads_id = int(item.get("ads_id"))
+            except (TypeError, ValueError):
+                continue
+            status = item.get("status")
+            if ads_id in ads_ids and status in {"subscribed", "notgetted", "unsubscribed"}:
+                statuses.append((ads_id, status))
+    return SubscriptionReview(True, tuple(statuses))
 
 
 def _as_int(value: object) -> int:

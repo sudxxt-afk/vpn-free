@@ -28,9 +28,9 @@ from app.services.github import SourceError, normalize_github_url, refresh_sourc
 from app.services.parser import address_diversity_key, classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.health import verified_pool_conditions
 from app.services.telegram import has_required_memberships, validate_bot_admin
-from app.services.subgram import get_subgram_access, get_subgram_statistics
-from app.services.subgram_webhooks import (clear_webhook_blocks_after_live_check, expected_bot_id, has_webhook_block,
-                                           process_webhooks, webhook_key_is_valid)
+from app.services.subgram import get_subgram_statistics
+from app.services.subgram_access import has_sponsor_block, resolve_subgram_access
+from app.services.subgram_webhooks import expected_bot_id, process_webhooks, webhook_key_is_valid
 from app.services.rate_limit import is_allowed
 from app.services.telegram_html import sanitize_telegram_html
 from app.services.analytics import daily_retention_cohorts, sequential_funnel
@@ -790,9 +790,7 @@ async def bot_access(telegram_id: int, target_devices: int = 1, db: Session = De
     allowed = await has_required_memberships(db, user)
     if not allowed:
         return {"allowed": False, "reason": "Подпишитесь на обязательные каналы", "sponsors": []}
-    decision = await get_subgram_access(user.telegram_id, username=user.username)
-    if decision.status == "ok" and clear_webhook_blocks_after_live_check(db, user.telegram_id):
-        db.commit()
+    decision = await resolve_subgram_access(db, user)
     return {
         "allowed": decision.allowed,
         "status": decision.status,
@@ -849,11 +847,9 @@ async def bot_restore_subscription(telegram_id: int, db: Session = Depends(get_d
         raise HTTPException(status_code=409, detail="Подписка уже возобновлена или недоступна для восстановления")
     if not await has_required_memberships(db, user):
         raise HTTPException(status_code=403, detail="Подпишитесь на обязательные каналы")
-    access = await get_subgram_access(user.telegram_id, username=user.username)
+    access = await resolve_subgram_access(db, user)
     if not access.allowed:
         raise HTTPException(status_code=403, detail="Сначала подпишитесь на каналы партнёров через /start")
-    if access.status == "ok":
-        clear_webhook_blocks_after_live_check(db, user.telegram_id)
     candidate = restoration_candidate(db, user.id)
     if candidate is None:
         raise HTTPException(status_code=409, detail="Архивная подписка не найдена")
@@ -909,11 +905,9 @@ async def bot_rotate_device(telegram_id: int, device_id: UUID, db: Session = Dep
     device = db.get(Device, device_id)
     if not user or not device or device.user_id != user.id:
         raise HTTPException(status_code=404, detail="Устройство не найдено")
-    access = await get_subgram_access(user.telegram_id, username=user.username)
+    access = await resolve_subgram_access(db, user)
     if not access.allowed:
         raise HTTPException(status_code=403, detail="Сначала подпишитесь на каналы партнёров через /start")
-    if access.status == "ok":
-        clear_webhook_blocks_after_live_check(db, user.telegram_id)
     archive_device_token(db, device, "user_rotated")
     token, token_hash, hint = generate_device_token()
     device.token_hash = token_hash
@@ -948,11 +942,9 @@ async def bot_create_device(telegram_id: int, payload: DeviceCreate, db: Session
     consumes_cutover_restore = subscription_can_be_restored(db, user.id, len(existing))
     if not await has_required_memberships(db, user):
         raise HTTPException(status_code=403, detail="Подпишитесь на обязательные каналы")
-    access = await get_subgram_access(user.telegram_id, username=user.username)
+    access = await resolve_subgram_access(db, user)
     if not access.allowed:
         raise HTTPException(status_code=403, detail="Сначала подпишитесь на каналы партнёров через /start")
-    if access.status == "ok":
-        clear_webhook_blocks_after_live_check(db, user.telegram_id)
     occupied = {item.slot for item in existing}
     slot = next(slot for slot in range(1, 9) if slot not in occupied)
     token, token_hash, hint = generate_device_token()
@@ -1230,15 +1222,13 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
     user = db.get(TelegramUser, device.user_id)
     if not user or user.is_blocked or not await has_required_memberships(db, user):
         raise HTTPException(status_code=403, detail="Выполните условия доступа в Telegram-боте")
-    if has_webhook_block(db, user.telegram_id):
+    if has_sponsor_block(db, user):
         body, headers = happ_sponsor_gate_payload()
         return Response(content=body, media_type="text/plain; charset=utf-8", headers=headers)
-    access = await get_subgram_access(user.telegram_id, username=user.username)
+    access = await resolve_subgram_access(db, user)
     if not access.allowed:
         body, headers = happ_sponsor_gate_payload()
         return Response(content=body, media_type="text/plain; charset=utf-8", headers=headers)
-    if access.status == "ok":
-        clear_webhook_blocks_after_live_check(db, user.telegram_id)
     track_event(db, "subscription_open", user_id=user.id, device_id=device.id)
     policy = pool_policy(db)
     rows = db.execute(

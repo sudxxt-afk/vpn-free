@@ -17,6 +17,7 @@ from app.models import TelegramUser
 from app.services.alerts import notify_admins, should_alert
 from app.services.github import refresh_source
 from app.services.health import check_active_nodes, purge_probe_history, verified_pool_conditions
+from app.services.subgram_access import recheck_due_access_states
 from app.services.telegram import has_required_memberships
 from app.services.broadcasts import process_broadcasts
 from app.services.donations import verify_pending_ton_donations
@@ -145,6 +146,12 @@ def revalidate_memberships() -> None:
         logging.info("membership validation users=%s failed=%s", len(users), failures)
 
 
+def revalidate_subgram_access() -> None:
+    with SessionLocal() as db:
+        checked, blocked = asyncio.run(recheck_due_access_states(db))
+        logging.info("Subgram access recheck checked=%s blocked=%s", checked, blocked)
+
+
 async def _notify_ton_donors(settled: list[tuple[int, float]]) -> None:
     if not settings.telegram_bot_token:
         return
@@ -201,6 +208,7 @@ def configure_scheduler(scheduler: BaseScheduler) -> None:
     # scheduler job only waits on the same probe lock and duplicates work.
     scheduler.add_job(cleanup_probe_history, "interval", days=1, id="probe-history-cleanup", max_instances=1, coalesce=True)
     scheduler.add_job(revalidate_memberships, "interval", hours=settings.membership_check_hours, id="memberships", max_instances=1, coalesce=True)
+    scheduler.add_job(revalidate_subgram_access, "interval", hours=1, id="subgram-access", max_instances=1, coalesce=True)
     scheduler.add_job(infrastructure_check, "interval", minutes=settings.alert_check_minutes, id="infrastructure", max_instances=1, coalesce=True)
     scheduler.add_job(process_broadcasts, "interval", seconds=5, id="broadcasts", max_instances=1, coalesce=True, next_run_time=run_now)
     scheduler.add_job(ton_donation_check, "interval", seconds=15, id="ton-donations", max_instances=1, coalesce=True)
