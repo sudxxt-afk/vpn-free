@@ -37,6 +37,21 @@ def telegram_ipv4_session() -> AiohttpSession:
     return session
 
 
+async def warm_telegram_connections(bot: Bot, *, required: int = 3, rounds: int = 4) -> int:
+    """Pre-open a small HTTPS pool so polling and replies do not need a cold TCP route."""
+    successful = 0
+    for _ in range(max(1, rounds)):
+        batch = await asyncio.gather(
+            *(asyncio.wait_for(bot.get_me(), timeout=6) for _ in range(max(1, required))),
+            return_exceptions=True,
+        )
+        successful += sum(not isinstance(result, BaseException) for result in batch)
+        if successful >= required:
+            return successful
+    logging.warning("Telegram connection warmup incomplete successful=%s required=%s", successful, required)
+    return successful
+
+
 async def clear_interactive_state(telegram_id: int, *, keep_broadcast: bool = False) -> None:
     """Do not let an abandoned flow capture input for a new one."""
     await interaction_states.clear(telegram_id)
@@ -1412,6 +1427,7 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode="HTML"),
     )
     try:
+        await warm_telegram_connections(bot)
         await dp.start_polling(bot)
     finally:
         await broadcast_drafts.close()
