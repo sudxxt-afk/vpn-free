@@ -1,4 +1,4 @@
-"""Live Subgram sponsor access checks without webhooks or local access state."""
+"""Live Subgram sponsor access checks with strict access decisions."""
 
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -122,10 +122,11 @@ async def get_subgram_access(
     chat_id: int | None = None,
     username: str | None = None,
 ) -> AccessDecision:
-    """Return a live access decision following Subgram's documented fail-open policy."""
+    """Grant access only after an explicit successful Subgram response."""
     settings = get_settings()
     if not settings.subgram_api_key:
-        return AccessDecision(True, "disabled")
+        logger.error("Subgram access key is not configured; denying access")
+        return AccessDecision(False, "error", reason="Проверка подписок временно не настроена. Попробуйте позже.")
 
     payload: dict[str, object] = {
         "user_id": telegram_id,
@@ -140,8 +141,8 @@ async def get_subgram_access(
     try:
         status_code, body = await _request(payload)
     except httpx.HTTPError as exc:
-        logger.warning("Subgram request failed; allowing access: %s", exc.__class__.__name__)
-        return AccessDecision(True, "error", reason="Subgram временно недоступен")
+        logger.warning("Subgram request failed; denying access: %s", exc.__class__.__name__)
+        return AccessDecision(False, "error", reason="Subgram временно недоступен. Попробуйте снова через минуту.")
 
     status = body.get("status")
     if status == "warning":
@@ -156,13 +157,13 @@ async def get_subgram_access(
                 sponsor_total=max(sponsor_total, len(sponsors)),
                 reason=_safe_text(body.get("message"), "Нужна подписка на каналы партнёров", 300),
             )
-        logger.warning("Subgram returned warning without displayable sponsors; allowing access")
-        return AccessDecision(True, "error", reason="Subgram не вернул доступные задания")
+        logger.warning("Subgram returned warning without displayable sponsors; denying access")
+        return AccessDecision(False, "error", reason="Subgram не вернул доступные задания. Попробуйте снова через минуту.")
     if status == "ok":
         return AccessDecision(True, "ok", reason=_safe_text(body.get("message"), "Доступ подтверждён", 300))
 
-    logger.warning("Subgram returned status=%r http=%s; allowing access", status, status_code)
-    return AccessDecision(True, "error", reason=_safe_text(body.get("message"), "Ошибка Subgram", 300))
+    logger.warning("Subgram returned status=%r http=%s; denying access", status, status_code)
+    return AccessDecision(False, "error", reason=_safe_text(body.get("message"), "Ошибка проверки Subgram. Попробуйте позже.", 300))
 
 
 def _as_int(value: object) -> int:

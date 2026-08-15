@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from app.database import Base
 from app.models import Node, NodeProbeAttempt, NodeProbeState, NodeState, Source, SourceQuality
-from app.services.health import _probe_targets, _selected_nodes, apply_probe_result, normalize_node_states, purge_probe_history, refresh_source_qualities
+from app.services.health import _probe_targets, _selected_nodes, _speed_probe_due, apply_probe_result, normalize_node_states, purge_probe_history, refresh_source_qualities
 from app.services.github import SourceError, normalize_github_url
 from app.services.parser import address_diversity_key, parse_config, parse_payload, transport_key, with_display_name
 from app.services.xray_probe import ProbeConfigError, ProbeResult, build_xray_config, probe_config
@@ -239,6 +239,54 @@ class XrayProbeTests(unittest.TestCase):
         self.assertEqual(result.failure_class, "config")
         self.assertIn("invalid TCP header config", result.error or "")
 
+    def test_speed_below_threshold_fails_the_probe(self):
+        class Process:
+            def __init__(self):
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO()
+                self.stderr = io.StringIO()
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+        class Response:
+            content = b"tiny"
+
+            def raise_for_status(self):
+                return None
+
+        class Client:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+        with patch("app.services.xray_probe.subprocess.Popen", return_value=Process()), patch(
+            "app.services.xray_probe._wait_for_socks", return_value=True,
+        ), patch("app.services.xray_probe.httpx.Client", Client), patch(
+            "app.services.xray_probe.time.perf_counter", side_effect=[0.0, 0.1, 0.1, 10.1],
+        ):
+            result = probe_config(
+                "vless://d5e9a2ee-1111-4444-9999-aaaaaaaaaaaa@8.8.8.8:443?security=tls&type=tcp",
+                xray_binary="xray", urls=("https://example.com",), required_successes=1,
+                speed_url="https://speed.example/file", min_speed_kbps=128, timeout_seconds=1,
+            )
+        self.assertFalse(result.success)
+        self.assertEqual((result.stage, result.failure_class), ("throughput", "network"))
+
     def test_builds_websocket_trojan_and_vmess_outbounds(self):
         trojan = build_xray_config(
             "trojan://secret@1.1.1.1:443?security=tls&type=ws&host=cdn.example.com&path=%2Fws&sni=example.com",
@@ -296,6 +344,21 @@ class XrayProbeTests(unittest.TestCase):
             ))
             self.assertEqual(node.state, NodeState.QUARANTINED)
             self.assertEqual(probe.last_error, "still unavailable")
+        engine.dispose()
+
+    def test_slow_speed_sample_does_not_satisfy_speed_freshness(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            source = Source(name="test", github_url="https://github.com/a/speed", raw_url="https://raw.githubusercontent.com/a/speed/main/list")
+            db.add(source); db.flush()
+            node = Node(source_id=source.id, fingerprint="s" * 64, protocol="vless", host="8.8.8.8", port=443,
+                        config_ciphertext="unused", state=NodeState.QUARANTINED)
+            db.add(node); db.flush()
+            db.add(NodeProbeAttempt(node_id=node.id, stage="throughput", failure_class="network", throughput_kbps=1.0))
+            db.commit()
+            self.assertTrue(_speed_probe_due(db, node.id))
         engine.dispose()
 
     def test_config_and_infrastructure_failures_have_different_state_effects(self):

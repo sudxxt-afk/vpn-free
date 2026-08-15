@@ -138,7 +138,7 @@ def _probe_targets() -> tuple[tuple[str, ...], str | None]:
                     with client.stream("GET", speed_url, headers={"User-Agent": "ZazaVPN-Health-Control/1.0"}) as response:
                         response.raise_for_status()
                 except httpx.HTTPError:
-                    logging.warning("speed control unavailable; skipping speed gate")
+                    logging.warning("speed control unavailable; deferring nodes that require a speed probe")
                     speed_url = None
     except httpx.HTTPError:
         healthy = []
@@ -227,31 +227,12 @@ def _selected_nodes(db: Session, priority_node_ids: list[UUID] | None = None) ->
     return [*priority, *retries, *active, *db.execute(other_query).all()]
 
 
-def retry_node_ids(db: Session, limit: int | None = None) -> list[UUID]:
-    retry_before = datetime.now(timezone.utc) - timedelta(seconds=settings.health_retry_seconds)
-    rows = db.scalars(
-        select(Node.id)
-        .join(Source, Source.id == Node.source_id)
-        .join(NodeProbeState, NodeProbeState.node_id == Node.id)
-        .where(
-            Source.is_enabled.is_(True), Node.state != NodeState.REMOVED,
-            NodeProbeState.last_checked_at < retry_before,
-            or_(
-                NodeProbeState.stage == "retrying",
-                and_(NodeProbeState.stage == "passed", Node.state.in_([NodeState.CANDIDATE, NodeState.DEGRADED])),
-            ),
-        )
-        .order_by(NodeProbeState.last_checked_at.asc()).limit(limit or max(2, settings.health_probe_batch_size // 3))
-    ).all()
-    return list(rows)
-
-
 def _speed_probe_due(db: Session, node_id: UUID) -> bool:
     fresh_after = datetime.now(timezone.utc) - timedelta(hours=settings.health_probe_speed_fresh_hours)
     last_speed = db.scalar(
         select(func.max(NodeProbeAttempt.checked_at)).where(
             NodeProbeAttempt.node_id == node_id,
-            NodeProbeAttempt.throughput_kbps.is_not(None),
+            NodeProbeAttempt.throughput_kbps >= settings.health_probe_min_speed_kbps,
         )
     )
     return last_speed is None or last_speed < fresh_after
@@ -372,7 +353,18 @@ def check_active_nodes(db: Session, priority_node_ids: list[UUID] | None = None)
         selected = _selected_nodes(db, priority_node_ids)
         if not selected:
             return 0, 0
-        work = [(node_id, ciphertext, speed_url if _speed_probe_due(db, node_id) else None) for node_id, ciphertext in selected]
+        work: list[tuple[UUID, str, str | None]] = []
+        speed_control_skipped = 0
+        for node_id, ciphertext in selected:
+            speed_due = _speed_probe_due(db, node_id)
+            if speed_due and settings.health_probe_speed_url and not speed_url:
+                speed_control_skipped += 1
+                continue
+            work.append((node_id, ciphertext, speed_url if speed_due else None))
+        if speed_control_skipped:
+            logging.warning("speed control unavailable; deferred speed probes=%s", speed_control_skipped)
+        if not work:
+            return 0, 0
         ok = 0
         stages: Counter[str] = Counter()
         affected_sources: set[UUID] = set()
@@ -390,5 +382,5 @@ def check_active_nodes(db: Session, priority_node_ids: list[UUID] | None = None)
                 ok += int(result.success)
                 stages[result.stage] += 1
         refresh_source_qualities(db, affected_sources)
-        logging.info("xray probe batch passed=%s total=%s priority=%s stages=%s", ok, len(selected), len({node_id for node_id, _ in selected} & set(priority_node_ids or [])), dict(stages))
-        return ok, len(selected)
+        logging.info("xray probe batch passed=%s total=%s priority=%s stages=%s", ok, len(work), len({node_id for node_id, _ciphertext, _speed_url in work} & set(priority_node_ids or [])), dict(stages))
+        return ok, len(work)

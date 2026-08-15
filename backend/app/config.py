@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     source_refresh_minutes: int = 20
     health_check_minutes: int = 2
-    health_probe_batch_size: int = 80
-    health_probe_concurrency: int = 3
+    health_probe_batch_size: int = 60
+    health_probe_concurrency: int = 4
     health_probe_timeout_seconds: float = 4.0
     health_probe_fresh_minutes: int = 45
     health_failure_grace_minutes: int = 15
@@ -68,3 +68,19 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def validate_runtime_settings(settings: Settings | None = None) -> None:
+    """Reject development secrets when running against a persistent database."""
+    settings = settings or get_settings()
+    if settings.database_url.startswith("sqlite"):
+        return
+    missing: list[str] = []
+    if not settings.app_encryption_key:
+        missing.append("APP_ENCRYPTION_KEY")
+    if settings.app_secret == "development-secret-change-me":
+        missing.append("APP_SECRET")
+    if settings.internal_api_key == "development-internal-key":
+        missing.append("INTERNAL_API_KEY")
+    if missing:
+        raise RuntimeError(f"Production settings are missing or insecure: {', '.join(missing)}")

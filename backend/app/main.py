@@ -11,9 +11,9 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.config import get_settings, validate_runtime_settings
 from app.crypto import decrypt
-from app.database import Base, SessionLocal, engine, get_db
+from app.database import Base, SessionLocal, bootstrap_lock, engine, get_db
 from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, BroadcastDelivery, Device, Donation, MetricSnapshot,
                         Node, NodeProbeAttempt, NodeProbeState, NodeState, PoolPolicy, RequiredChannel, RetiredSubscription, Role, Source,
                         SourceQuality, SourceRun, SubgramSponsorState, SubgramWebhookEvent, SupportMessage, SupportTicket, TelegramUser)
@@ -45,26 +45,28 @@ settings = get_settings()
 
 
 def bootstrap() -> None:
-    Base.metadata.create_all(bind=engine)
-    with SessionLocal() as db:
-        reconcile_existing_restorations(db)
-        if engine.dialect.name == "postgresql":
-            # Telegram IDs exceed signed 32-bit integers. Keep existing local installs usable.
-            db.execute(text("ALTER TABLE telegram_users ALTER COLUMN telegram_id TYPE BIGINT"))
-            db.execute(text("ALTER TABLE required_channels ALTER COLUMN chat_id TYPE BIGINT"))
-            db.execute(text("ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_blocked_at TIMESTAMPTZ"))
-            db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS telegram_id BIGINT"))
-            db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS telegram_username VARCHAR(128)"))
-            db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS support_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
-            db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_admin_users_telegram_id ON admin_users (telegram_id) WHERE telegram_id IS NOT NULL"))
-            db.execute(text("ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]'"))
-            db.execute(text("ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS client_request_id UUID"))
-            db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_broadcast_campaigns_client_request_id ON broadcast_campaigns (client_request_id) WHERE client_request_id IS NOT NULL"))
-            db.commit()
-        exists = db.scalar(select(AdminUser).where(AdminUser.login == settings.initial_admin_login))
-        if not exists:
-            db.add(AdminUser(login=settings.initial_admin_login, password_hash=hash_password(settings.initial_admin_password), role=Role.OWNER))
-            db.commit()
+    validate_runtime_settings(settings)
+    with bootstrap_lock():
+        Base.metadata.create_all(bind=engine)
+        with SessionLocal() as db:
+            reconcile_existing_restorations(db)
+            if engine.dialect.name == "postgresql":
+                # Telegram IDs exceed signed 32-bit integers. Keep existing local installs usable.
+                db.execute(text("ALTER TABLE telegram_users ALTER COLUMN telegram_id TYPE BIGINT"))
+                db.execute(text("ALTER TABLE required_channels ALTER COLUMN chat_id TYPE BIGINT"))
+                db.execute(text("ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_blocked_at TIMESTAMPTZ"))
+                db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS telegram_id BIGINT"))
+                db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS telegram_username VARCHAR(128)"))
+                db.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS support_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
+                db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_admin_users_telegram_id ON admin_users (telegram_id) WHERE telegram_id IS NOT NULL"))
+                db.execute(text("ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]'"))
+                db.execute(text("ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS client_request_id UUID"))
+                db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_broadcast_campaigns_client_request_id ON broadcast_campaigns (client_request_id) WHERE client_request_id IS NOT NULL"))
+                db.commit()
+            exists = db.scalar(select(AdminUser).where(AdminUser.login == settings.initial_admin_login))
+            if not exists:
+                db.add(AdminUser(login=settings.initial_admin_login, password_hash=hash_password(settings.initial_admin_password), role=Role.OWNER))
+                db.commit()
 
 
 @asynccontextmanager

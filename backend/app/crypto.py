@@ -10,7 +10,8 @@ def _fernet() -> Fernet:
     configured = get_settings().app_encryption_key
     if configured:
         return Fernet(configured.encode())
-    # Development fallback; deployments must configure APP_ENCRYPTION_KEY.
+    # Runtime startup validation prevents this development fallback from being
+    # used in production. Keeping it here makes isolated SQLite tests portable.
     key = base64.urlsafe_b64encode(hashlib.sha256(get_settings().app_secret.encode()).digest())
     return Fernet(key)
 
@@ -21,4 +22,3 @@ def encrypt(value: str) -> str:
 
 def decrypt(value: str) -> str:
     return _fernet().decrypt(value.encode()).decode()
-

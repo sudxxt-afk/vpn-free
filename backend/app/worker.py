@@ -10,13 +10,13 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.schedulers.base import BaseScheduler
 from sqlalchemy import func, select
 
-from app.config import get_settings
-from app.database import Base, SessionLocal, engine
+from app.config import get_settings, validate_runtime_settings
+from app.database import Base, SessionLocal, bootstrap_lock, engine
 from app.models import MetricSnapshot, Node, NodeProbeState, NodeState, Source, SourceQuality
 from app.models import TelegramUser
 from app.services.alerts import notify_admins, should_alert
 from app.services.github import refresh_source
-from app.services.health import check_active_nodes, purge_probe_history, retry_node_ids, verified_pool_conditions
+from app.services.health import check_active_nodes, purge_probe_history, verified_pool_conditions
 from app.services.telegram import has_required_memberships
 from app.services.broadcasts import process_broadcasts
 from app.services.donations import verify_pending_ton_donations
@@ -89,15 +89,6 @@ def health_check() -> None:
             asyncio.run(notify_admins(f"Качество пула упало: успешно {ok} из {total} проверок."))
         if previous and previous.active_nodes >= 10 and active < previous.active_nodes * settings.node_drop_alert_ratio and asyncio.run(should_alert("node-drop")):
             asyncio.run(notify_admins(f"Активные ноды резко упали: {previous.active_nodes} → {active}."))
-
-
-def retry_unstable_nodes() -> None:
-    with SessionLocal() as db:
-        node_ids = retry_node_ids(db)
-        if not node_ids:
-            return
-        ok, total = check_active_nodes(db, priority_node_ids=node_ids)
-        logging.info("retry probes successful=%s total=%s", ok, total)
 
 
 def cleanup_probe_history() -> None:
@@ -206,7 +197,8 @@ def configure_scheduler(scheduler: BaseScheduler) -> None:
         jitter=max(0, settings.health_scheduler_jitter_seconds),
         next_run_time=run_now + timedelta(minutes=2),
     )
-    scheduler.add_job(retry_unstable_nodes, "interval", seconds=max(60, settings.health_retry_seconds), id="health-retry", max_instances=1, coalesce=True)
+    # check_active_nodes already gives due retries most of every batch. A second
+    # scheduler job only waits on the same probe lock and duplicates work.
     scheduler.add_job(cleanup_probe_history, "interval", days=1, id="probe-history-cleanup", max_instances=1, coalesce=True)
     scheduler.add_job(revalidate_memberships, "interval", hours=settings.membership_check_hours, id="memberships", max_instances=1, coalesce=True)
     scheduler.add_job(infrastructure_check, "interval", minutes=settings.alert_check_minutes, id="infrastructure", max_instances=1, coalesce=True)
@@ -215,9 +207,10 @@ def configure_scheduler(scheduler: BaseScheduler) -> None:
 
 
 if __name__ == "__main__":
-    # The API usually creates the schema first; this keeps a fresh Compose
-    # deployment race-free when the scheduler starts before the API listener.
-    Base.metadata.create_all(bind=engine)
+    # API and worker may start together; the shared advisory lock serializes DDL.
+    validate_runtime_settings(settings)
+    with bootstrap_lock():
+        Base.metadata.create_all(bind=engine)
     scheduler = BlockingScheduler(timezone="UTC")
     configure_scheduler(scheduler)
     scheduler.start()

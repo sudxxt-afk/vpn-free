@@ -1,7 +1,9 @@
-"""Redis-backed fixed-window limits with a fail-open path for Redis outages."""
+"""Redis-backed limits with a process-local safety net for Redis outages."""
 
+import asyncio
 import hashlib
 import logging
+import time
 
 from fastapi import Request
 from redis.asyncio import Redis
@@ -11,6 +13,22 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 redis_client: Redis | None = None
+_local_windows: dict[str, tuple[int, int]] = {}
+_local_lock = asyncio.Lock()
+
+
+async def _local_is_allowed(key: str, limit: int, window: int) -> tuple[bool, int, int]:
+    """Keep enforcing a bounded limit when Redis is temporarily unavailable."""
+    slot = int(time.monotonic() // window)
+    async with _local_lock:
+        previous_slot, count = _local_windows.get(key, (slot, 0))
+        count = count + 1 if previous_slot == slot else 1
+        _local_windows[key] = (slot, count)
+        if len(_local_windows) > 10_000:
+            stale = [item_key for item_key, (item_slot, _count) in _local_windows.items() if item_slot < slot]
+            for item_key in stale:
+                _local_windows.pop(item_key, None)
+        return count <= limit, limit, window
 
 
 def client_ip(request: Request) -> str:
@@ -48,5 +66,5 @@ async def is_allowed(request: Request) -> tuple[bool, int, int] | None:
             await redis_client.expire(f"ratelimit:{key}", window)
         return count <= limit, limit, window
     except Exception as exc:
-        logger.warning("Rate limiter unavailable; allowing request: %s", exc)
-        return None
+        logger.warning("Redis rate limiter unavailable; using local limiter: %s", exc.__class__.__name__)
+        return await _local_is_allowed(key, limit, window)

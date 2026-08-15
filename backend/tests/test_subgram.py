@@ -45,7 +45,7 @@ class SubgramTests(unittest.TestCase):
             "username": "tester",
         })
 
-    def test_ok_and_provider_errors_fail_open_as_documented(self):
+    def test_only_explicit_ok_grants_access(self):
         with patch("app.services.subgram.get_settings", return_value=self.settings), patch(
             "app.services.subgram._request", AsyncMock(return_value=(200, {"status": "ok", "message": "ok"})),
         ):
@@ -56,15 +56,22 @@ class SubgramTests(unittest.TestCase):
             "app.services.subgram._request", AsyncMock(side_effect=httpx.ConnectError("offline", request=request)),
         ):
             result = asyncio.run(get_subgram_access(123))
-        self.assertTrue(result.allowed)
+        self.assertFalse(result.allowed)
         self.assertEqual(result.status, "error")
 
-    def test_warning_without_safe_links_fails_open(self):
+    def test_warning_without_safe_links_fails_closed(self):
         with patch("app.services.subgram.get_settings", return_value=self.settings), patch(
             "app.services.subgram._request", AsyncMock(return_value=(200, {"status": "warning", "additional": {"sponsors": []}})),
         ):
             result = asyncio.run(get_subgram_access(123))
-        self.assertTrue(result.allowed)
+        self.assertFalse(result.allowed)
+
+    def test_missing_key_fails_closed(self):
+        settings = SimpleNamespace(subgram_api_key="")
+        with patch("app.services.subgram.get_settings", return_value=settings):
+            result = asyncio.run(get_subgram_access(123))
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.status, "error")
 
     def test_statistics_are_normalized_from_documented_response(self):
         settings = SimpleNamespace(
@@ -150,7 +157,25 @@ class SubgramStartTests(unittest.IsolatedAsyncioTestCase):
         text = message.answer.await_args.args[0]
         self.assertIn("Каналы спонсоров", text)
         self.assertEqual(message.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0].url, "https://t.me/sponsor")
-        self.assertEqual(api.await_count, 2)
+        self.assertEqual(api.await_count, 1)
+
+    async def test_returning_subscriber_sees_sponsors_before_restore(self):
+        message = SimpleNamespace(answer=AsyncMock())
+        access = {
+            "allowed": False,
+            "status": "warning",
+            "sponsors": [{"link": "https://t.me/sponsor", "title": "Новости", "button_text": "Подписаться"}],
+            "sponsor_total": 1,
+        }
+        with patch("app.bot.ensure_user", AsyncMock(return_value=123)), patch(
+            "app.bot.allowed", AsyncMock(return_value=access),
+        ), patch("app.bot.api", AsyncMock(return_value={"can_restore": True})) as api:
+            await start(message)
+
+        text = message.answer.await_args.args[0]
+        self.assertIn("Каналы спонсоров", text)
+        self.assertNotIn("Возобновить подписку", text)
+        self.assertEqual(api.await_count, 1)
 
 
 if __name__ == "__main__":

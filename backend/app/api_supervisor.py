@@ -14,6 +14,7 @@ HEALTH_URL = "http://127.0.0.1:8000/health"
 STARTUP_SECONDS = int(os.getenv("API_SUPERVISOR_STARTUP_SECONDS", "20"))
 CHECK_INTERVAL_SECONDS = int(os.getenv("API_SUPERVISOR_CHECK_INTERVAL_SECONDS", "15"))
 MAX_FAILURES = int(os.getenv("API_SUPERVISOR_MAX_FAILURES", "3"))
+WORKERS = max(1, int(os.getenv("API_WORKERS", "1")))
 
 
 def healthcheck(timeout: float = 3) -> bool:
@@ -46,7 +47,7 @@ def main() -> int:
         "--port",
         "8000",
         "--workers",
-        "2",
+        str(WORKERS),
         "--timeout-keep-alive",
         "5",
     ])
