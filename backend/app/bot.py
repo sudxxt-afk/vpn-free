@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import socket
 from html import escape
 from urllib.parse import quote, urlparse
 
@@ -8,6 +9,7 @@ import httpx
 import qrcode
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -26,6 +28,13 @@ admin_reply_waiting: dict[int, str] = {}
 admin_user_search_waiting: set[int] = set()
 broadcast_drafts = BroadcastDraftStore()
 interaction_states = InteractionStateStore()
+
+
+def telegram_ipv4_session() -> AiohttpSession:
+    """Avoid Telegram request stalls when the host advertises unusable IPv6."""
+    session = AiohttpSession()
+    session._connector_init["family"] = socket.AF_INET
+    return session
 
 
 async def clear_interactive_state(telegram_id: int, *, keep_broadcast: bool = False) -> None:
@@ -1397,7 +1406,11 @@ async def main() -> None:
     if not settings.telegram_bot_token:
         logging.warning("TELEGRAM_BOT_TOKEN is empty; bot will not start")
         return
-    bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode="HTML"))
+    bot = Bot(
+        settings.telegram_bot_token,
+        session=telegram_ipv4_session(),
+        default=DefaultBotProperties(parse_mode="HTML"),
+    )
     try:
         await dp.start_polling(bot)
     finally:
