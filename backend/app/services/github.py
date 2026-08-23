@@ -11,7 +11,7 @@ from app.models import Node, NodeState, Source, SourceRun
 from app.services.parser import decode_subscription_body, parse_payload
 
 MAX_SOURCE_BYTES = 5 * 1024 * 1024
-SOURCE_USER_AGENT = "Mozilla/5.0 (compatible; ZazaVPN/1.0)"
+SOURCE_USER_AGENT = "ZazaVPN/1.0"
 HAPP_ADD_PREFIX = "happ://add/"
 
 
