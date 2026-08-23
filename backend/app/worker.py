@@ -18,7 +18,7 @@ from app.models import MetricSnapshot, Node, NodeProbeState, NodeState, Source, 
 from app.models import TelegramUser
 from app.services.alerts import notify_admins, should_alert
 from app.services.github import refresh_source
-from app.services.health import check_active_nodes, purge_probe_history, verified_pool_conditions
+from app.services.health import check_active_nodes, purge_probe_history, purge_removed_nodes, verified_pool_conditions
 from app.services.subgram_access import recheck_due_access_states
 from app.services.telegram import has_required_memberships
 from app.services.broadcasts import process_broadcasts
@@ -101,6 +101,12 @@ def cleanup_probe_history() -> None:
     with SessionLocal() as db:
         deleted = purge_probe_history(db)
         logging.info("probe history cleanup deleted=%s", deleted)
+
+
+def cleanup_removed_nodes() -> None:
+    with SessionLocal() as db:
+        deleted = purge_removed_nodes(db)
+        logging.info("removed nodes cleanup deleted=%s", deleted)
 
 
 def _tls_days_left(hostname: str, port: int) -> int:
@@ -228,6 +234,7 @@ def configure_scheduler(scheduler: BaseScheduler) -> None:
     # check_active_nodes already gives due retries most of every batch. A second
     # scheduler job only waits on the same probe lock and duplicates work.
     scheduler.add_job(cleanup_probe_history, "interval", days=1, id="probe-history-cleanup", max_instances=1, coalesce=True)
+    scheduler.add_job(_with_deadlock_retry(cleanup_removed_nodes), "interval", days=1, id="removed-nodes-cleanup", max_instances=1, coalesce=True)
     scheduler.add_job(revalidate_memberships, "interval", hours=settings.membership_check_hours, id="memberships", max_instances=1, coalesce=True)
     scheduler.add_job(revalidate_subgram_access, "interval", hours=1, id="subgram-access", max_instances=1, coalesce=True)
     scheduler.add_job(infrastructure_check, "interval", minutes=settings.alert_check_minutes, id="infrastructure", max_instances=1, coalesce=True)

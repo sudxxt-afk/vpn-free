@@ -351,6 +351,17 @@ def purge_probe_history(db: Session) -> int:
     return deleted
 
 
+def purge_removed_nodes(db: Session, days: int = 7) -> int:
+    """Drop tombstoned nodes after a grace week; sources re-import them on return."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+    deleted = db.execute(delete(Node).where(
+        Node.state == NodeState.REMOVED,
+        or_(Node.removed_at.is_(None), Node.removed_at < cutoff),
+    )).rowcount or 0
+    db.commit()
+    return deleted
+
+
 def check_active_nodes(db: Session, priority_node_ids: list[UUID] | None = None) -> tuple[int, int]:
     with _probe_cycle_lock:
         normalize_node_states(db)

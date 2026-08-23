@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from app.database import Base
 from app.models import Node, NodeProbeAttempt, NodeProbeState, NodeState, Source, SourceQuality
-from app.services.health import _probe_targets, _selected_nodes, _speed_probe_due, apply_probe_result, normalize_node_states, purge_probe_history, refresh_source_qualities
+from app.services.health import _probe_targets, _selected_nodes, _speed_probe_due, apply_probe_result, normalize_node_states, purge_probe_history, purge_removed_nodes, refresh_source_qualities
 from app.services.github import SourceError, normalize_github_url
 from app.services.parser import address_diversity_key, parse_config, parse_payload, transport_key, with_display_name
 from app.services.xray_probe import ProbeConfigError, ProbeResult, build_xray_config, probe_config
@@ -397,6 +397,28 @@ class XrayProbeTests(unittest.TestCase):
             db.commit()
             self.assertEqual(purge_probe_history(db), 1)
             self.assertEqual(db.scalar(select(func.count()).select_from(NodeProbeAttempt)), 1)
+        engine.dispose()
+
+    def test_removed_nodes_cleanup_keeps_recent_tombstones_and_live_nodes(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        with Session() as db:
+            source = Source(name="test", github_url="https://github.com/a/r", raw_url="https://raw.githubusercontent.com/a/r/main/list")
+            db.add(source); db.flush()
+            db.add_all([
+                Node(source_id=source.id, fingerprint="o" * 64, protocol="vless", host="9.9.9.9", port=443,
+                     config_ciphertext="unused", state=NodeState.REMOVED,
+                     removed_at=datetime.now(timezone.utc) - timedelta(days=10)),
+                Node(source_id=source.id, fingerprint="n" * 64, protocol="vless", host="9.9.9.8", port=443,
+                     config_ciphertext="unused", state=NodeState.REMOVED, removed_at=datetime.now(timezone.utc)),
+                Node(source_id=source.id, fingerprint="a" * 64, protocol="vless", host="9.9.9.7", port=443,
+                     config_ciphertext="unused", state=NodeState.ACTIVE),
+            ])
+            db.commit()
+            self.assertEqual(purge_removed_nodes(db), 1)
+            remaining = db.scalar(select(func.count()).select_from(Node))
+            self.assertEqual(remaining, 2)
         engine.dispose()
 
     def test_unhealthy_controls_are_removed_and_speed_gate_can_be_skipped(self):
