@@ -218,7 +218,10 @@ async def get_subgram_subscriptions(user_id: int, ads_ids: tuple[int, ...]) -> S
         logger.warning("Subgram subscription recheck failed: %s", exc.__class__.__name__)
         return SubscriptionReview(False)
     if status_code != 200 or body.get("status") != "ok":
-        logger.warning("Subgram subscription recheck rejected http=%s status=%r", status_code, body.get("status"))
+        # Subgram answers 404 when it no longer knows this user-task pair, for
+        # example after the sponsor task was archived on their side. That is a
+        # permanent answer for the pair, not a transport failure.
+        logger.info("Subgram subscription recheck rejected http=%s status=%r", status_code, body.get("status"))
         return SubscriptionReview(False)
     additional = body.get("additional")
     items = additional.get("sponsors") if isinstance(additional, dict) else None
@@ -232,7 +235,7 @@ async def get_subgram_subscriptions(user_id: int, ads_ids: tuple[int, ...]) -> S
             except (TypeError, ValueError):
                 continue
             status = item.get("status")
-            if ads_id in ads_ids and status in {"subscribed", "notgetted", "unsubscribed"}:
+            if ads_id in ads_ids and status in {"subscribed", "subpin", "notgetted", "unsubscribed"}:
                 statuses.append((ads_id, status))
     return SubscriptionReview(True, tuple(statuses))
 

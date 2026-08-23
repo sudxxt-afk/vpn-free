@@ -115,15 +115,18 @@ async def recheck_due_access_states(db: Session, limit: int = 100) -> tuple[int,
             state.last_checked_at = _utcnow()
             continue
         review = await get_subgram_subscriptions(user.telegram_id, ads_ids)
+        # Webhooks remain the primary revocation channel, so a failed check is
+        # not retried hourly: Subgram answers 404 permanently for task pairs it
+        # no longer knows.
+        state.last_checked_at = _utcnow()
         if not review.available:
             continue
         statuses = dict(review.statuses)
         checked += 1
-        state.last_checked_at = _utcnow()
         if any(status == "unsubscribed" for status in statuses.values()):
             state.blocked_at = _utcnow()
             blocked += 1
-        elif all(ads_id in statuses and statuses[ads_id] in {"subscribed", "notgetted"} for ads_id in ads_ids):
+        elif all(ads_id in statuses and statuses[ads_id] in {"subscribed", "subpin", "notgetted"} for ads_id in ads_ids):
             state.blocked_at = None
         for ads_id, status in statuses.items():
             db.execute(update(SubgramSponsorState).where(
