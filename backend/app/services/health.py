@@ -64,6 +64,10 @@ def normalize_node_states(db: Session) -> tuple[int, int]:
             last_checked_at=None,
         )
     ).rowcount or 0
+    # Each bulk UPDATE commits alone so its row locks never overlap the
+    # per-node writes of a concurrent source refresh.
+    if legacy:
+        db.commit()
     stale_ids = (
         select(Node.id)
         .join(Source, Source.id == Node.source_id)
@@ -71,8 +75,9 @@ def normalize_node_states(db: Session) -> tuple[int, int]:
         .where(Node.state == NodeState.ACTIVE, not_(and_(*verified_pool_conditions())))
     )
     stale = db.execute(update(Node).where(Node.id.in_(stale_ids)).values(state=NodeState.DEGRADED)).rowcount or 0
-    if legacy or stale:
+    if stale:
         db.commit()
+    if legacy or stale:
         logging.info("normalized node states legacy=%s stale=%s", legacy, stale)
     return legacy, stale
 
@@ -95,13 +100,16 @@ def refresh_source_qualities(db: Session, source_ids: set[UUID]) -> None:
         if quality is None:
             quality = SourceQuality(source_id=source_id)
             db.add(quality)
+        for node, probe in rows:
+            node.score = calculate_score(node, probe.throughput_kbps, pass_rate)
+        # Lock-order contract: nodes rows first, then the quality row. The
+        # opposite order elsewhere turns concurrent writers into deadlocks.
+        db.flush()
         quality.checked_nodes = checked
         quality.passed_nodes = passed
         quality.rejected_nodes = checked - passed
         quality.pass_rate = round(pass_rate, 4)
         quality.rejection_reasons_json = json.dumps(dict(reasons.most_common(5)), ensure_ascii=False)
-        for node, probe in rows:
-            node.score = calculate_score(node, probe.throughput_kbps, pass_rate)
     db.commit()
 
 

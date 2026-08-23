@@ -2,6 +2,7 @@ import asyncio
 import logging
 import socket
 import ssl
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -9,6 +10,7 @@ import httpx
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.schedulers.base import BaseScheduler
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 
 from app.config import get_settings, validate_runtime_settings
 from app.database import Base, SessionLocal, bootstrap_lock, engine
@@ -49,10 +51,13 @@ def refresh_all_sources() -> None:
                 quality = SourceQuality(source_id=source.id)
                 db.add(quality)
             quality.new_nodes_last_run = len(new_ids)
+            # Commit per source. A pending source_qualities row leaking into the
+            # next refresh_source transaction locked quality rows before nodes
+            # rows and deadlocked against the health job's opposite order.
+            db.commit()
             if run.status in {"error", "guarded"}:
                 if asyncio.run(should_alert(f"source:{source.id}:{run.status}")):
                     asyncio.run(notify_admins(f"Источник {source.name}: {run.message or run.status}"))
-        db.commit()
         if priority_node_ids:
             logging.info("new source nodes queued for immediate probe=%s", len(priority_node_ids))
             ok, total = check_active_nodes(db, priority_node_ids=priority_node_ids)
@@ -181,11 +186,27 @@ def ton_donation_check() -> None:
         logging.exception("TON donation verification failed")
 
 
+def _with_deadlock_retry(job):
+    """Retry once when Postgres kills the transaction with a deadlock; without
+    this the scheduler only logs the failure and waits a whole cycle."""
+    def run():
+        try:
+            job()
+        except OperationalError as exc:
+            if "deadlock" not in str(exc).lower():
+                raise
+            logging.warning("job %s hit a database deadlock; retrying once", job.__name__)
+            time.sleep(2)
+            job()
+    run.__name__ = job.__name__
+    return run
+
+
 def configure_scheduler(scheduler: BaseScheduler) -> None:
     """Register recurring work without blocking queue processing at boot."""
     run_now = datetime.now(timezone.utc)
     scheduler.add_job(
-        refresh_all_sources,
+        _with_deadlock_retry(refresh_all_sources),
         "interval",
         minutes=settings.source_refresh_minutes,
         id="sources",
@@ -195,7 +216,7 @@ def configure_scheduler(scheduler: BaseScheduler) -> None:
         next_run_time=run_now,
     )
     scheduler.add_job(
-        health_check,
+        _with_deadlock_retry(health_check),
         "interval",
         minutes=settings.health_check_minutes,
         id="health",
