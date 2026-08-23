@@ -8,30 +8,41 @@ from sqlalchemy.orm import Session
 
 from app.crypto import encrypt
 from app.models import Node, NodeState, Source, SourceRun
-from app.services.parser import parse_payload
+from app.services.parser import decode_subscription_body, parse_payload
 
 MAX_SOURCE_BYTES = 5 * 1024 * 1024
+SOURCE_USER_AGENT = "Mozilla/5.0 (compatible; ZazaVPN/1.0)"
+HAPP_ADD_PREFIX = "happ://add/"
 
 
 class SourceError(ValueError):
     pass
 
 
-def normalize_github_url(value: str) -> str:
-    parsed = urlparse(value.strip())
+def normalize_source_url(value: str) -> str:
+    """Accept GitHub files and generic client subscription URLs (happ://add/...)."""
+    text = value.strip()
+    lowered = text.lower()
+    if lowered.startswith(HAPP_ADD_PREFIX):
+        text = text[len(HAPP_ADD_PREFIX):].strip()
+    elif lowered.startswith("happ://"):
+        raise SourceError("Поддерживаются ссылки happ://add/<https-адрес подписки>")
+    parsed = urlparse(text)
     if parsed.scheme != "https":
-        raise SourceError("Разрешены только HTTPS-ссылки GitHub")
+        raise SourceError("Разрешены только HTTPS-ссылки")
+    if not parsed.hostname or not parsed.path.strip("/"):
+        raise SourceError("Укажите полный адрес файла или подписки")
     if parsed.hostname == "raw.githubusercontent.com":
         if len(parsed.path.strip("/").split("/")) < 4:
             raise SourceError("Укажите путь к конкретному файлу GitHub")
-        return value.strip()
+        return text
     if parsed.hostname == "github.com":
         parts = parsed.path.strip("/").split("/")
         if len(parts) >= 5 and parts[2] == "blob":
             owner, repo, _, ref = parts[:4]
             path = "/".join(parts[4:])
             return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
-    raise SourceError("Поддерживаются GitHub blob и raw.githubusercontent.com ссылки на файл")
+    return text
 
 
 def _run(db: Session, source: Source, status: str, message: str | None = None) -> SourceRun:
@@ -51,39 +62,53 @@ def _finish(run: SourceRun, *, status: str, found: int = 0, published: int = 0, 
 
 def refresh_source(db: Session, source: Source) -> SourceRun:
     run = _run(db, source, "running")
-    headers = {"Accept": "text/plain"}
+    headers = {"Accept": "text/plain", "User-Agent": SOURCE_USER_AGENT}
     if source.etag:
         headers["If-None-Match"] = source.etag
     if source.last_modified:
         headers["If-Modified-Since"] = source.last_modified
     try:
-        with httpx.Client(follow_redirects=False, timeout=18.0) as client:
+        with httpx.Client(follow_redirects=True, timeout=18.0) as client:
             response = client.get(source.raw_url, headers=headers)
         if response.status_code == 304:
-            _finish(run, status="unchanged", message="GitHub подтвердил неизменность файла")
+            _finish(run, status="unchanged", message="Источник подтвердил неизменность")
             source.last_success_at = datetime.now(timezone.utc)
             db.commit()
             return run
         response.raise_for_status()
         if len(response.content) > MAX_SOURCE_BYTES:
-            raise SourceError("Файл источника превышает 5 MiB")
-        content = response.text
+            raise SourceError("Тело источника превышает 5 MiB")
+        raw_body = response.text
     except (httpx.HTTPError, SourceError) as exc:
         source.last_error = str(exc)
         _finish(run, status="error", message=str(exc))
         db.commit()
         return run
 
-    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    content_hash = hashlib.sha256(raw_body.encode()).hexdigest()
     if content_hash == source.content_hash:
         source.etag = response.headers.get("etag", source.etag)
         source.last_modified = response.headers.get("last-modified", source.last_modified)
         source.last_success_at = datetime.now(timezone.utc)
-        _finish(run, status="unchanged", message="Хеш файла не изменился")
+        _finish(run, status="unchanged", message="Хеш тела не изменился")
+        db.commit()
+        return run
+
+    try:
+        content = decode_subscription_body(raw_body)
+    except ValueError as exc:
+        content = ""
+        source.last_error = str(exc)
+        _finish(run, status="error", message=f"Не удалось разобрать тело источника: {exc}")
         db.commit()
         return run
 
     configs = parse_payload(content)
+    if not configs and raw_body.lstrip().startswith(("[", "{")):
+        source.last_error = "empty subscription payload"
+        _finish(run, status="error", message="Подписка не содержит распознанных серверов")
+        db.commit()
+        return run
     previous = db.scalars(select(Node).where(Node.source_id == source.id, Node.state != NodeState.REMOVED)).all()
     previous_count = len(previous)
     anomalous = previous_count >= 5 and (len(configs) < previous_count * 0.2 or len(configs) > previous_count * 10)

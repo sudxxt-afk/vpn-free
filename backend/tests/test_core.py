@@ -13,8 +13,8 @@ from unittest.mock import patch
 from app.database import Base
 from app.models import Node, NodeProbeAttempt, NodeProbeState, NodeState, Source, SourceQuality
 from app.services.health import _probe_targets, _selected_nodes, _speed_probe_due, apply_probe_result, normalize_node_states, purge_probe_history, purge_removed_nodes, refresh_source_qualities
-from app.services.github import SourceError, normalize_github_url
-from app.services.parser import address_diversity_key, parse_config, parse_payload, transport_key, with_display_name
+from app.services.github import SourceError, normalize_source_url
+from app.services.parser import address_diversity_key, decode_subscription_body, parse_config, parse_payload, transport_key, with_display_name, xray_json_share_links
 from app.services.xray_probe import ProbeConfigError, ProbeResult, build_xray_config, probe_config
 from app.services.scoring import calculate_score
 
@@ -58,23 +58,87 @@ class ParserTests(unittest.TestCase):
         self.assertIn("security=reality&type=tcp", named)
         self.assertIn("%F0%9F%93%A1", named)
 
+    def test_decodes_base64_subscription_body(self):
+        body = base64.b64encode("vless://id@8.8.8.8:443#demo\ntrojan://pw@1.1.1.1:443#x".encode()).decode()
+        decoded = decode_subscription_body(body)
+        self.assertIn("vless://id@8.8.8.8:443", decoded)
+        self.assertEqual(len(parse_payload(decoded)), 2)
 
-class GitHubUrlTests(unittest.TestCase):
+    def test_plain_uri_list_passes_through(self):
+        text = "vless://id@8.8.8.8:443?security=reality&sni=a.example&fp=chrome&pbk=K&sid=ab#demo"
+        self.assertEqual(decode_subscription_body(text), text)
+
+    def test_xray_json_export_becomes_share_links(self):
+        export = json.dumps([{
+            "remarks": "Германия",
+            "outbounds": [
+                {
+                    "protocol": "vless",
+                    "settings": {"vnext": [{"address": "45.195.228.100", "port": 443,
+                                            "users": [{"id": "a3827cb7-8dea-4bc8-a354-37f4341b12ba",
+                                                       "encryption": "none", "flow": "xtls-rprx-vision"}]}]},
+                    "streamSettings": {"network": "tcp", "security": "reality",
+                                       "realitySettings": {"serverName": "storage.yandex.net",
+                                                           "publicKey": "KYlgK96xPZJq10GbhF-BaCXRxXc9XzxzfICdooYvMlg",
+                                                           "shortId": "f45c9665f3261108", "fingerprint": "firefox"}},
+                },
+                {"protocol": "freedom"},
+            ],
+        }])
+        links = xray_json_share_links(export)
+        self.assertEqual(len(links), 1)
+        self.assertTrue(links[0].startswith("vless://a3827cb7-8dea-4bc8-a354-37f4341b12ba@45.195.228.100:443?"))
+        self.assertIn("security=reality", links[0])
+        self.assertIn("pbk=KYlgK96xPZJq10GbhF-BaCXRxXc9XzxzfICdooYvMlg", links[0])
+        self.assertIn("flow=xtls-rprx-vision", links[0])
+        parsed = parse_config(links[0])
+        self.assertEqual((parsed.protocol, parsed.host, parsed.port), ("vless", "45.195.228.100", 443))
+
+    def test_xray_json_shadowsocks_outbound_becomes_ss_link(self):
+        export = json.dumps([{
+            "remarks": "Финляндия SS",
+            "outbounds": [{
+                "protocol": "shadowsocks",
+                "settings": {"servers": [{"address": "95.214.55.10", "port": 8388,
+                                          "method": "aes-128-gcm", "password": "secret"}]},
+            }],
+        }])
+        links = xray_json_share_links(export)
+        self.assertEqual(len(links), 1)
+        parsed = parse_config(links[0])
+        self.assertEqual((parsed.protocol, parsed.host, parsed.port), ("ss", "95.214.55.10", 8388))
+
+
+class SourceUrlTests(unittest.TestCase):
     def test_normalizes_blob_url(self):
         self.assertEqual(
-            normalize_github_url("https://github.com/example/repo/blob/main/list.txt"),
+            normalize_source_url("https://github.com/example/repo/blob/main/list.txt"),
             "https://raw.githubusercontent.com/example/repo/main/list.txt",
         )
 
     def test_normalizes_encoded_github_filename(self):
         self.assertEqual(
-            normalize_github_url("https://github.com/igareck/vpn-configs-for-russia/blob/main/BLACK_SS%2BAll_RUS.txt"),
+            normalize_source_url("https://github.com/igareck/vpn-configs-for-russia/blob/main/BLACK_SS%2BAll_RUS.txt"),
             "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_SS%2BAll_RUS.txt",
         )
 
-    def test_rejects_non_github_url(self):
+    def test_accepts_generic_https_subscription(self):
+        self.assertEqual(
+            normalize_source_url("https://provider.example/connection/subs/abc"),
+            "https://provider.example/connection/subs/abc",
+        )
+
+    def test_strips_happ_add_prefix(self):
+        self.assertEqual(
+            normalize_source_url("happ://add/https://connliberty.com/connection/subs/a8f3e8f7"),
+            "https://connliberty.com/connection/subs/a8f3e8f7",
+        )
+
+    def test_rejects_http_and_bare_happ_links(self):
         with self.assertRaises(SourceError):
-            normalize_github_url("https://example.org/list.txt")
+            normalize_source_url("http://example.org/list.txt")
+        with self.assertRaises(SourceError):
+            normalize_source_url("happ://add/some-non-url")
 
 
 class XrayProbeTests(unittest.TestCase):

@@ -24,7 +24,7 @@ from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLooku
                          StarDonationIntent, StarDonationPreCheckout, SubgramStatisticsDayResponse, SubgramStatisticsResponse,
                          SubgramWebhookPayload, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
-from app.services.github import SourceError, normalize_github_url, refresh_source
+from app.services.github import SourceError, normalize_source_url, refresh_source
 from app.services.parser import address_diversity_key, classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.health import verified_pool_conditions
 from app.services.telegram import has_required_memberships, validate_bot_admin
@@ -527,7 +527,7 @@ def list_sources(request: Request, db: Session = Depends(get_db)) -> list[Source
 def create_source(payload: SourceCreate, request: Request, db: Session = Depends(get_db)) -> SourceResponse:
     current = require_admin(request, {Role.OWNER, Role.ADMIN})
     try:
-        raw_url = normalize_github_url(payload.github_url)
+        raw_url = normalize_source_url(payload.github_url)
     except SourceError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if db.scalar(select(Source).where(Source.raw_url == raw_url)):

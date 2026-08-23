@@ -3,7 +3,7 @@ import hashlib
 import ipaddress
 import json
 from dataclasses import dataclass
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 SUPPORTED_PROTOCOLS = {"vless", "ss", "trojan", "vmess", "hysteria2", "hy2", "tuic"}
 
@@ -176,3 +176,150 @@ def parse_payload(payload: str) -> list[ParsedConfig]:
         if config:
             parsed[config.fingerprint] = config
     return list(parsed.values())
+
+
+_XRAY_PROXY_PROTOCOLS = {"vless", "vmess", "trojan", "shadowsocks"}
+
+
+def _xray_json_stream_params(stream: object) -> list[tuple[str, str]]:
+    if not isinstance(stream, dict):
+        return [("type", "tcp"), ("security", "none")]
+    network = str(stream.get("network") or "tcp").lower()
+    security = str(stream.get("security") or "none").lower()
+    if security in {"false", "0"}:
+        security = "none"
+    params = [("type", network), ("security", security)]
+    settings = stream.get("realitySettings") or stream.get("tlsSettings")
+    if isinstance(settings, dict):
+        mapping = (("serverName", "sni"), ("fingerprint", "fp"), ("publicKey", "pbk"), ("shortId", "sid"), ("spiderX", "spx"))
+        for source_key, param in mapping:
+            value = settings.get(source_key)
+            if value not in (None, ""):
+                params.append((param, str(value)))
+        alpn = settings.get("alpn")
+        if isinstance(alpn, list) and alpn:
+            params.append(("alpn", ",".join(str(item) for item in alpn)))
+    ws = stream.get("wsSettings")
+    if isinstance(ws, dict):
+        path = ws.get("path")
+        if path:
+            params.append(("path", str(path)))
+        headers = ws.get("headers")
+        host = headers.get("Host") if isinstance(headers, dict) else None
+        if host:
+            params.append(("host", str(host)))
+    grpc = stream.get("grpcSettings")
+    if isinstance(grpc, dict) and grpc.get("serviceName"):
+        params.append(("serviceName", str(grpc["serviceName"])))
+    tcp = stream.get("tcpSettings")
+    header = tcp.get("header") if isinstance(tcp, dict) else None
+    if isinstance(header, dict) and header.get("type") not in (None, "none"):
+        params.append(("headerType", str(header["type"])))
+    return params
+
+
+def _xray_json_outbound_uri(outbound: dict, name: str) -> str | None:
+    protocol = str(outbound.get("protocol") or "").lower()
+    if protocol not in _XRAY_PROXY_PROTOCOLS:
+        return None
+    settings = outbound.get("settings")
+    if not isinstance(settings, dict):
+        return None
+    endpoint: dict = {}
+    if isinstance(settings.get("vnext"), list) and settings["vnext"]:
+        endpoint = settings["vnext"][0]
+    elif isinstance(settings.get("servers"), list) and settings["servers"]:
+        endpoint = settings["servers"][0]
+    address = str(endpoint.get("address") or "").strip()
+    port = int(endpoint.get("port") or 0)
+    if not address or not 1 <= port <= 65535:
+        return None
+    stream = outbound.get("streamSettings")
+    query = urlencode(_xray_json_stream_params(stream))
+    label = quote(name or f"{address}:{port}", safe="")
+    users = endpoint.get("users") if isinstance(endpoint.get("users"), list) else []
+    user = users[0] if users else {}
+    if protocol == "vless":
+        user_id = str(user.get("id") or "").strip()
+        if not user_id:
+            return None
+        extra = ""
+        flow = user.get("flow")
+        if flow:
+            extra += f"&flow={quote(str(flow), safe='')}"
+        encryption = user.get("encryption") or "none"
+        return f"vless://{user_id}@{address}:{port}?{query}{extra}&encryption={encryption}#{label}"
+    password = str(endpoint.get("password") or "").strip()
+    method = str(endpoint.get("method") or "").strip()
+    if protocol == "trojan" and password:
+        return f"trojan://{quote(password, safe='')}@{address}:{port}?{query}#{label}"
+    if protocol == "shadowsocks" and method and password:
+        userinfo = base64.urlsafe_b64encode(f"{method}:{password}".encode()).decode().rstrip("=")
+        plugin = endpoint.get("plugin")
+        plugin_part = f"?plugin={quote(str(plugin), safe='')}" if plugin else ""
+        return f"ss://{userinfo}@{address}:{port}{plugin_part}#{label}"
+    if protocol == "vmess" and user.get("id"):
+        payload = {
+            "v": "2", "ps": name, "add": address, "port": str(port), "id": str(user.get("id")),
+            "aid": str(user.get("alterId") or 0), "scy": user.get("security") or "auto",
+        }
+        if isinstance(stream, dict):
+            payload["net"] = str(stream.get("network") or "tcp")
+            payload["tls"] = "tls" if str(stream.get("security")) == "tls" else ""
+            reality_or_tls = stream.get("tlsSettings") or stream.get("realitySettings")
+            if isinstance(reality_or_tls, dict):
+                payload["sni"] = str(reality_or_tls.get("serverName") or "")
+            ws = stream.get("wsSettings")
+            if isinstance(ws, dict):
+                payload["path"] = str(ws.get("path") or "")
+                headers = ws.get("headers")
+                if isinstance(headers, dict) and headers.get("Host"):
+                    payload["host"] = str(headers["Host"])
+        encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
+        return f"vmess://{encoded}"
+    return None
+
+
+def xray_json_share_links(raw: str) -> list[str]:
+    """Convert Xray client JSON exports into standard share links."""
+    data = json.loads(raw)
+    elements = data if isinstance(data, list) else [data]
+    links: list[str] = []
+    seen: set[str] = set()
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        remark = str(element.get("remarks") or element.get("title") or "").strip()
+        proxies = [item for item in element.get("outbounds") or [] if isinstance(item, dict)]
+        usable = 0
+        for outbound in proxies:
+            suffix = f" · {usable + 1}" if len([p for p in proxies if str(p.get('protocol') or '').lower() in _XRAY_PROXY_PROTOCOLS]) > 1 else ""
+            uri = _xray_json_outbound_uri(outbound, f"{remark}{suffix}")
+            if not uri:
+                continue
+            key = uri.split("#", 1)[0]
+            if key in seen:
+                continue
+            seen.add(key)
+            links.append(uri)
+            usable += 1
+    return links
+
+
+def decode_subscription_body(raw: str) -> str:
+    """Return newline-separated share links from a plain, base64 or JSON body."""
+    text = raw.strip()
+    if not text:
+        return text
+    first_line = text.splitlines()[0].lstrip()
+    if first_line.startswith(("[", "{")):
+        return "\n".join(xray_json_share_links(text))
+    if "://" in first_line:
+        return text
+    compacted = "".join(text.split())
+    padded = compacted.replace("-", "+").replace("_", "/") + "=" * (-len(compacted) % 4)
+    try:
+        decoded = base64.b64decode(padded.encode(), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return text
+    return decoded if "://" in decoded else text
