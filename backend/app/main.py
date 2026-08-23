@@ -1231,13 +1231,22 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
         return Response(content=body, media_type="text/plain; charset=utf-8", headers=headers)
     track_event(db, "subscription_open", user_id=user.id, device_id=device.id)
     policy = pool_policy(db)
-    rows = db.execute(
-        select(Node, Source)
-        .join(Source, Source.id == Node.source_id)
-        .join(NodeProbeState, NodeProbeState.node_id == Node.id)
-        .where(*verified_pool_conditions())
-        .order_by(Node.score.desc())
-    ).all()
+    if settings.subscription_include_unverified:
+        # Publish every live node of enabled sources without quality gating.
+        rows = db.execute(
+            select(Node, Source)
+            .join(Source, Source.id == Node.source_id)
+            .where(Source.is_enabled.is_(True), Node.state != NodeState.REMOVED)
+            .order_by(Node.score.desc())
+        ).all()
+    else:
+        rows = db.execute(
+            select(Node, Source)
+            .join(Source, Source.id == Node.source_id)
+            .join(NodeProbeState, NodeProbeState.node_id == Node.id)
+            .where(*verified_pool_conditions())
+            .order_by(Node.score.desc())
+        ).all()
     selected: list[tuple[Node, Source, str]] = []
     counts: dict[str, int] = {}
     source_counts: dict[UUID, int] = {}

@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     xray_binary: str = "/usr/local/bin/xray"
     subscription_max_per_source: int = 12
     subscription_max_per_host: int = 1
+    subscription_include_unverified: bool = False
     membership_check_hours: int = 12
     subgram_api_key: str = ""
     subgram_statistics_token: str = ""
