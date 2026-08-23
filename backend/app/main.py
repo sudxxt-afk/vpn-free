@@ -1260,11 +1260,14 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
             continue
         if source_counts.get(source.id, 0) >= settings.subscription_max_per_source:
             continue
-        if host_counts.get(node.host, 0) >= settings.subscription_max_per_host:
-            continue
-        address_group = address_diversity_key(node.host)
-        if address_group and address_group in address_groups:
-            continue
+        if not settings.subscription_include_unverified:
+            if host_counts.get(node.host, 0) >= settings.subscription_max_per_host:
+                continue
+            address_group = address_diversity_key(node.host)
+            if address_group and address_group in address_groups:
+                continue
+        else:
+            address_group = None
         counts[key] = counts.get(key, 0) + 1
         source_counts[source.id] = source_counts.get(source.id, 0) + 1
         host_counts[node.host] = host_counts.get(node.host, 0) + 1
