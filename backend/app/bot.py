@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import socket
+from datetime import datetime, timezone
 from html import escape
 from urllib.parse import quote, urlparse
 
@@ -996,27 +997,77 @@ async def admin_broadcast_confirm(callback: CallbackQuery) -> None:
         await callback.answer(str(exc), show_alert=True)
 
 
+def _device_emoji(label: str) -> str:
+    value = (label or "").lower()
+    if any(key in value for key in ("ipad", "планшет", "tablet", "tab ")):
+        return "📲"
+    if any(key in value for key in ("tv", "телевизор", "приставк", "box", "console", "приставка")):
+        return "📺"
+    if any(key in value for key in ("mac", "book", "ноут", "laptop", "pc", "комп", "windows", "linux", "desktop")):
+        return "💻"
+    if any(key in value for key in ("router", "роутер", "киви")):
+        return "📡"
+    return "📱"
+
+
+def _format_device_activity(iso_value: str | None) -> str:
+    if not iso_value:
+        return "не подключалась"
+    try:
+        moment = datetime.fromisoformat(iso_value)
+    except ValueError:
+        return "не подключалась"
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - moment
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 1:
+        return "только что"
+    if minutes < 60:
+        return f"{minutes} мин назад"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} ч назад"
+    days = delta.days
+    if days == 1:
+        return "вчера"
+    if days < 30:
+        return f"{days} дн назад"
+    return moment.strftime("%d.%m.%Y")
+
+
 async def show_devices(callback: CallbackQuery) -> None:
     telegram_id = await ensure_user(callback)
-    devices = await api("GET", f"/internal/users/{telegram_id}/devices")
-    status = await api("GET", f"/internal/users/{telegram_id}/vpn-status")
-    rows = [[InlineKeyboardButton(
-        text=f"{item['slot']}. {item['label']} · {'использовалось' if item.get('last_used_at') else 'не подключено'}",
-        callback_data=f"vpn:device:{item['id']}",
-    )] for item in devices]
+    devices, status = await asyncio.gather(
+        api("GET", f"/internal/users/{telegram_id}/devices"),
+        api("GET", f"/internal/users/{telegram_id}/vpn-status"),
+    )
+    pool_line = f"🟢 Серверов онлайн: <b>{status.get('active_nodes', 0)}</b>"
+    ping = status.get("average_ping")
+    if ping:
+        pool_line += f" · средний пинг <b>{ping:g} мс</b>"
+    activity_line = "🕒 Активность в HAPP: " + _format_device_activity(status.get("last_subscription_open"))
+    rows = []
+    for item in devices:
+        emoji = _device_emoji(item["label"])
+        marker = "🟢" if item.get("last_used_at") else "⚪"
+        title = escape(item["label"])[:40]
+        rows.append([InlineKeyboardButton(
+            text=f"{marker} {emoji} {title}",
+            callback_data=f"vpn:device:{item['id']}",
+        )])
     if len(devices) < 8:
-        rows.append([InlineKeyboardButton(text="➕ Добавить устройство", callback_data="vpn:add")])
+        rows.append([InlineKeyboardButton(text=f"➕ Добавить устройство ({len(devices)}/8)", callback_data="vpn:add")])
     if status.get("can_restore"):
         rows.append([InlineKeyboardButton(text="♻️ Возобновить подписку", callback_data="vpn:restore")])
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="vpn:home")])
-    last_open = status.get("last_subscription_open")
-    await edit_callback_screen(
-        callback,
-        f"📱 <b>Мои устройства: {len(devices)}/8</b>\n\n"
-        f"Последнее обновление в HAPP: <b>{last_open[:16].replace('T', ' ') if last_open else 'ещё не было'}</b>.\n"
-        "Открой устройство, чтобы переименовать, удалить или безопасно перевыпустить ссылку.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    body = (
+        f"📱 <b>Мои устройства</b> · {len(devices)} из 8\n\n"
+        f"{pool_line}\n{activity_line}\n\n"
+        "Каждое устройство — отдельная ссылка. Открой карточку, чтобы "
+        "перейти к странице подключения, переименовать или перевыпустить ссылку."
     )
+    await edit_callback_screen(callback, body, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
 
@@ -1071,21 +1122,33 @@ async def device_details(callback: CallbackQuery) -> None:
         await callback.answer("Устройство уже удалено", show_alert=True)
         await show_devices(callback)
         return
-    last_used = device.get("last_used_at")
-    rows = [
-        [InlineKeyboardButton(text="✏️ Переименовать", callback_data=f"vpn:rename:{device_id}"),
-         InlineKeyboardButton(text="♻️ Перевыпустить", callback_data=f"vpn:rotate:{device_id}")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"vpn:delete-confirm:{device_id}")],
-        [InlineKeyboardButton(text="⬅️ К устройствам", callback_data="vpn:get")],
-    ]
-    await edit_callback_screen(
-        callback,
-        f"📱 <b>{escape(device['label'])}</b>\n\nСлот: {device['slot']} из 8\n"
-        f"Создано: {(device.get('created_at') or '')[:10] or '—'}\n"
-        f"Последнее обновление HAPP: {(last_used or '')[:16].replace('T', ' ') or 'ещё не было'}\n"
-        f"Ключ: …{device['token_hint']}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    used = bool(device.get("last_used_at"))
+    status_line = "🟢 подключена" if used else "⚪ ещё не подключалась"
+    created = (device.get("created_at") or "")[:10] or "—"
+    subscription_url = device.get("subscription_url") or ""
+    token = subscription_url.rsplit("/", 1)[-1] if subscription_url else ""
+    landing_url = (
+        f"{settings.web_app_base_url.rstrip('/')}/connect?token={quote(token, safe='')}" if token else ""
     )
+    rows = []
+    if landing_url:
+        rows.append([InlineKeyboardButton(text="🔗 Страница подключения", url=landing_url)])
+    rows.append([
+        InlineKeyboardButton(text="✏️ Переименовать", callback_data=f"vpn:rename:{device_id}"),
+        InlineKeyboardButton(text="♻️ Перевыпустить", callback_data=f"vpn:rotate:{device_id}"),
+    ])
+    rows.append([InlineKeyboardButton(text="🗑 Удалить устройство", callback_data=f"vpn:delete-confirm:{device_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К устройствам", callback_data="vpn:get")])
+    body = (
+        f"{_device_emoji(device['label'])} <b>{escape(device['label'])}</b>\n\n"
+        f"Статус: {status_line}\n"
+        f"Подключалась: {_format_device_activity(device.get('last_used_at'))}\n"
+        f"Добавлено: {created}\n"
+        f"Ключ ссылки: …{device['token_hint']}\n\n"
+        "💡 «Страница подключения» копирует ссылку и подскажет, как импортировать её в HAPP. "
+        "«Перевыпустить» стоит нажимать, если ссылка попала к чужим — старая перестанет работать."
+    )
+    await edit_callback_screen(callback, body, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
 
