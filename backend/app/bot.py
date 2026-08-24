@@ -323,7 +323,7 @@ async def record_telegram_block(event: ErrorEvent) -> bool:
 def menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📱 Мои устройства", callback_data="vpn:get", style="primary")],
-        [InlineKeyboardButton(text="📊 Проверить VPN", callback_data="vpn:status"), InlineKeyboardButton(text="📘 Инструкция", callback_data="vpn:help")],
+        [InlineKeyboardButton(text="📘 Инструкция", callback_data="vpn:help")],
         [InlineKeyboardButton(text="🛟 Поддержка", callback_data="vpn:support")],
         [InlineKeyboardButton(text="❤️ Поддержать проект", callback_data="donate:home", style="success")],
     ])
@@ -1268,7 +1268,7 @@ async def support_callback(callback: CallbackQuery) -> None:
          InlineKeyboardButton(text="📱 Ошибка HAPP", callback_data="support:category:happ")],
         [InlineKeyboardButton(text="🐢 Низкая скорость", callback_data="support:category:speed"),
          InlineKeyboardButton(text="💳 Платёж", callback_data="support:category:payment")],
-        [InlineKeyboardButton(text="Другое", callback_data="support:category:other")],
+        [InlineKeyboardButton(text="❓ Другое", callback_data="support:category:other", style="danger")],
         [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="vpn:home")],
     ])
     await edit_callback_screen(
