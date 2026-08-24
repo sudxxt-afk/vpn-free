@@ -20,7 +20,7 @@ from app.models import (AdminUser, AnalyticsEvent, AuditLog, BroadcastCampaign, 
 from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLookup, BotUserRequest, BroadcastCreate, ChannelCreate, ChannelResponse, DashboardResponse,
                          DeviceCreate, DeviceResponse, DeviceUpdate, LoginRequest, ManagedAdminResponse, ManagedUserResponse,
                          AnalyticsCohortResponse, AnalyticsDayResponse, AnalyticsResponse, InternalEventPayload, LandingEventPayload, MetricSnapshotResponse,
-                         NodeProbeAttemptResponse, NodeResponse, PoolPolicyPayload, PoolPolicyResponse, SourceCreate, SourceResponse, StarDonationComplete,
+                         NodeProbeAttemptResponse, NodeResponse, PoolPolicyPayload, PoolPolicyResponse, RegionStat, SourceCreate, SourceResponse, StarDonationComplete,
                          StarDonationIntent, StarDonationPreCheckout, SubgramStatisticsDayResponse, SubgramStatisticsResponse,
                          SubgramWebhookPayload, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
@@ -328,6 +328,20 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
     ).all()
     cohorts = daily_retention_cohorts(first_starts, events, now.date(), cohort_days=min(days, 14))
     donation_totals = donation_analytics(db, start)
+    region_counts: dict[tuple[str, str], int] = {}
+    active_configs = db.execute(
+        select(Node.config_ciphertext, Node.host)
+        .join(Source, Source.id == Node.source_id)
+        .where(Source.is_enabled.is_(True), Node.state == NodeState.ACTIVE)
+        .limit(1000)
+    ).all()
+    for ciphertext, host in active_configs:
+        flag, region = display_region(decrypt(ciphertext), host)
+        region_counts[(flag, region)] = region_counts.get((flag, region), 0) + 1
+    top_regions = [
+        RegionStat(emoji=flag, region=region, count=count_value)
+        for (flag, region), count_value in sorted(region_counts.items(), key=lambda item: -item[1])[:5]
+    ]
     return AnalyticsResponse(
         total_bot_users=db.scalar(select(func.count()).select_from(TelegramUser)) or 0,
         new_bot_users=db.scalar(select(func.count()).select_from(TelegramUser).where(TelegramUser.created_at >= start)) or 0,
@@ -352,6 +366,7 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
         **donation_totals,
         days=[AnalyticsDayResponse(date=date, **values) for date, values in points.items()],
         cohorts=[AnalyticsCohortResponse(**item) for item in cohorts],
+        top_regions=top_regions,
     )
 
 

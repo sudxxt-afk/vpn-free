@@ -220,6 +220,12 @@ class AnalyticsCohortResponse(BaseModel):
     d7: float | None = None
 
 
+class RegionStat(BaseModel):
+    emoji: str
+    region: str
+    count: int
+
+
 class AnalyticsResponse(BaseModel):
     total_bot_users: int
     new_bot_users: int
@@ -248,6 +254,7 @@ class AnalyticsResponse(BaseModel):
     donation_ton_total: float
     days: list[AnalyticsDayResponse]
     cohorts: list[AnalyticsCohortResponse]
+    top_regions: list[RegionStat] = []
 
 
 class SubgramStatisticsDayResponse(BaseModel):
