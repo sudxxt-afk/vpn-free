@@ -3,6 +3,14 @@ version: "3.3"
 services:
   postgres:
     image: postgres:16-alpine
+    # A 1 GB host cannot afford default sizing; our workload peaks far below
+    # these limits (api + worker pools stay under ~20 connections combined).
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=30
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
