@@ -322,10 +322,10 @@ async def record_telegram_block(event: ErrorEvent) -> bool:
 
 def menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Мои устройства", callback_data="vpn:get")],
+        [InlineKeyboardButton(text="📱 Мои устройства", callback_data="vpn:get", style="primary")],
         [InlineKeyboardButton(text="📊 Проверить VPN", callback_data="vpn:status"), InlineKeyboardButton(text="📘 Инструкция", callback_data="vpn:help")],
         [InlineKeyboardButton(text="🛟 Поддержка", callback_data="vpn:support")],
-        [InlineKeyboardButton(text="❤️ Поддержать проект", callback_data="donate:home")],
+        [InlineKeyboardButton(text="❤️ Поддержать проект", callback_data="donate:home", style="success")],
     ])
 
 
@@ -1057,9 +1057,9 @@ async def show_devices(callback: CallbackQuery) -> None:
             callback_data=f"vpn:device:{item['id']}",
         )])
     if len(devices) < 8:
-        rows.append([InlineKeyboardButton(text=f"➕ Добавить устройство ({len(devices)}/8)", callback_data="vpn:add")])
+        rows.append([InlineKeyboardButton(text=f"➕ Добавить устройство ({len(devices)}/8)", callback_data="vpn:add", style="success")])
     if status.get("can_restore"):
-        rows.append([InlineKeyboardButton(text="♻️ Возобновить подписку", callback_data="vpn:restore")])
+        rows.append([InlineKeyboardButton(text="♻️ Возобновить подписку", callback_data="vpn:restore", style="success")])
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="vpn:home")])
     body = (
         f"📱 <b>Мои устройства</b> · {len(devices)} из 8\n\n"
@@ -1132,12 +1132,12 @@ async def device_details(callback: CallbackQuery) -> None:
     )
     rows = []
     if landing_url:
-        rows.append([InlineKeyboardButton(text="🔗 Страница подключения", url=landing_url)])
+        rows.append([InlineKeyboardButton(text="🔗 Страница подключения", url=landing_url, style="primary")])
     rows.append([
         InlineKeyboardButton(text="✏️ Переименовать", callback_data=f"vpn:rename:{device_id}"),
         InlineKeyboardButton(text="♻️ Перевыпустить", callback_data=f"vpn:rotate:{device_id}"),
     ])
-    rows.append([InlineKeyboardButton(text="🗑 Удалить устройство", callback_data=f"vpn:delete-confirm:{device_id}")])
+    rows.append([InlineKeyboardButton(text="🗑 Удалить устройство", callback_data=f"vpn:delete-confirm:{device_id}", style="danger")])
     rows.append([InlineKeyboardButton(text="⬅️ К устройствам", callback_data="vpn:get")])
     body = (
         f"{_device_emoji(device['label'])} <b>{escape(device['label'])}</b>\n\n"
@@ -1165,7 +1165,7 @@ async def rename_device_prompt(callback: CallbackQuery) -> None:
 async def delete_device_confirm(callback: CallbackQuery) -> None:
     device_id = callback.data.rsplit(":", 1)[1]
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Удалить устройство", callback_data=f"vpn:delete:{device_id}")],
+        [InlineKeyboardButton(text="Удалить устройство", callback_data=f"vpn:delete:{device_id}", style="danger")],
         [InlineKeyboardButton(text="Отмена", callback_data=f"vpn:device:{device_id}")],
     ])
     await edit_callback_screen(callback, "Удалить устройство? Его текущая ссылка перестанет работать, восстановить её будет нельзя.", reply_markup=markup)
