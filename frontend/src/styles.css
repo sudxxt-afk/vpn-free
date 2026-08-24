@@ -42,3 +42,23 @@ select.filter-input { width:auto; cursor:pointer; }
 .donut-label { fill:var(--muted); font-size:9px; letter-spacing:.12em; text-transform:uppercase; }
 .heat-table td { vertical-align:middle; }
 .heat-cell { display:inline-grid; place-items:center; min-width:56px; padding:7px 10px; border-radius:8px; font-weight:750; font-size:12px; }
+
+/* --- layout hardening for analytics widgets --- */
+.funnel-track { height:auto; }
+.funnel-fill { height:12px; border-radius:7px; max-width:72%; flex:none; }
+.funnel-track strong { margin-left:0; color:var(--ink); font-size:14px; position:static; }
+.funnel-row { grid-template-columns:140px minmax(0,1fr); }
+.donation-split { align-items:flex-start; gap:22px; }
+.donation-split .donation-grid { flex:1 1 380px; min-width:0; display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); }
+.donut-wrap { width:132px; }
+.region-row strong { width:130px; flex:none; }
+.region-track i { max-width:62%; }
+.heat-cell { min-width:46px; padding:6px 8px; font-size:11px; }
+.metric-card { overflow:hidden; }
+@media (max-width:1100px){ .sync-note { display:none; } }
+@media (max-width:800px){
+  .funnel-row { grid-template-columns:1fr; gap:6px; }
+  .funnel-row > small { margin-bottom:2px; }
+  .donut-wrap { margin:0 auto 14px; }
+  .region-row strong { width:104px; }
+}
