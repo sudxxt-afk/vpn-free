@@ -1,6 +1,6 @@
 # Zaza VPN
 
-Zaza VPN is a control plane and Telegram bot for free personal VPN subscriptions. It automatically processes public GitHub configuration files, health-checks parsed endpoints and exposes only active, highly rated configurations through device-scoped subscription URLs.
+Zaza VPN is a control plane and Telegram bot for free personal VPN subscriptions. It ingests proxy nodes from client subscription links (including `happ://add/...` URLs) and public GitHub files, health-checks every node with a real Xray binary, and exposes only live configurations through device-scoped subscription URLs.
 
 The bot's primary flow is a personal Zaza VPN connection page (`/connect?token=…`). It copies the subscription link and guides the user through importing it into **HAPP**, the primary client. HAPP receives the Wi-Fi and LTE auto-connect entries first, followed by the selected servers.
 
@@ -22,9 +22,20 @@ For production, `WEB_APP_BASE_URL` must be the public **HTTPS** address of the f
 3. The Zaza page copies the device-scoped subscription and sends the user to the HAPP download page.
 4. In HAPP the user chooses **«+» → «Импорт по ссылке»**, pastes the copied value, and connects.
 
-HAPP is the primary client. Its published instructions describe importing a copied subscription link, so the project uses that reliable flow rather than inventing an unverified `happ://` deep link.
+HAPP is the primary client. Its published instructions describe importing a copied subscription link, so the project uses that reliable flow rather than inventing an unverified `happ://deep link`.
 
-The first source must be a public GitHub `blob` or `raw.githubusercontent.com` URL to a text file containing supported URI configuration lines.
+## Sources
+
+Add sources in the admin panel («Источники»). Supported inputs:
+
+- **Client subscription links** — `happ://add/<https-url>` or a direct `https://` subscription URL. Bodies may be plain URI lists, Base64 envelopes, or Xray JSON exports (`[{"remarks": …, "outbounds": …}]`); everything is converted to standard share links before import.
+- **Public GitHub files** — `github.com/blob` or `raw.githubusercontent.com` links to text files containing supported URI configuration lines.
+
+Subscription providers frequently serve different payloads per User-Agent: a neutral non-browser UA is used when fetching, and redirects are followed.
+
+### Publication modes
+
+By default only independently verified nodes are published (see Schedules). Setting `SUBSCRIPTION_INCLUDE_UNVERIFIED=true` publishes **every** live node of enabled sources without quality gating, protocol caps beyond `SUBSCRIPTION_MAX_PER_SOURCE`, host limits, or subnet deduplication. Use it when pool size matters more than strict verification.
 
 ## Supported URI protocols
 
@@ -32,8 +43,9 @@ VLESS, Shadowsocks, Trojan, VMess, Hysteria2 and TUIC.
 
 ## Schedules
 
-- GitHub source refresh: every 40 minutes.
+- Source refresh: every 20 minutes by default (`SOURCE_REFRESH_MINUTES`). New nodes are probed immediately.
 - Active-node health checks: every 2 minutes by default. A node is published only after two independent successful Xray-backed HTTP checks; speed affects ranking, not availability.
+- Tombstone cleanup: removed nodes are purged daily after a week; probe history is trimmed to 14 days.
 - Telegram membership revalidation: every 12 hours.
 
 ## Telegram operator panel

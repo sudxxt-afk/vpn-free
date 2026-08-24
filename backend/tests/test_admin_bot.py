@@ -139,7 +139,26 @@ class AdminBotTests(unittest.TestCase):
         self.assertEqual(match_ton_transaction(item, valid), {"tx_hash": "tx-1", "sender": "sender", "value": 1_000_000_000})
 
 
+class _NullInteractionStateStore:
+    """Keeps tests off the shared Redis-backed store whose pooled connection
+    is bound to an already-closed proactor loop from a previous test."""
+
+    async def get(self, _telegram_id):
+        return None
+
+    async def set(self, _telegram_id, _kind, **_data):
+        return None
+
+    async def clear(self, _telegram_id):
+        return None
+
+
 class BroadcastButtonTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        patcher = patch.object(bot_module, "interaction_states", _NullInteractionStateStore())
+        patcher.start()
+        self.addAsyncCleanup(patcher.stop)
+
     async def test_interaction_state_survives_store_recreation(self):
         class FakeRedis:
             values: dict[str, str] = {}
