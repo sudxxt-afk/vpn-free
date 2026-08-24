@@ -120,6 +120,28 @@ def display_region(value: str, host: str) -> tuple[str, str]:
     return "🌐", "Неизвестный регион"
 
 
+_REGION_NOISE = ("свеж", "гбит", "mbit", "тест", "test", "gaming", "игров", "premium", "vip", "new")
+
+
+def base_region_label(label: str) -> str:
+    """Reduce verbose provider names ('Германия | самый свежий …') to a place."""
+    text = "".join(
+        char for char in (label or "").replace("[", " ").replace("]", " ")
+        if not ("\U0001F1E6" <= char <= "\U0001F1FF")
+    )
+    text = " ".join(text.split())
+    if not text:
+        return "Неизвестный регион"
+    segments = [segment.strip(" ·•—|-–") for segment in text.split("|")]
+    segments = [segment for segment in segments if segment]
+    usable = [
+        segment for segment in segments
+        if len(segment) <= 24 and not any(noise in segment.lower() for noise in _REGION_NOISE)
+    ]
+    pool = usable or segments
+    return min(pool, key=len)[:24]
+
+
 def with_display_name(value: str, label: str) -> str:
     """Rename a URI for client display without modifying endpoint parameters."""
     if value.lower().startswith("vmess://"):

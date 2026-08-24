@@ -25,7 +25,7 @@ from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLooku
                          SubgramWebhookPayload, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_source_url, refresh_source
-from app.services.parser import address_diversity_key, classify_network_profile, display_region, parse_config, transport_key, with_display_name
+from app.services.parser import address_diversity_key, base_region_label, classify_network_profile, display_region, parse_config, transport_key, with_display_name
 from app.services.health import verified_pool_conditions
 from app.services.telegram import has_required_memberships, validate_bot_admin
 from app.services.subgram import get_subgram_statistics
@@ -337,7 +337,8 @@ def analytics(request: Request, db: Session = Depends(get_db), days: int = 14) -
     ).all()
     for ciphertext, host in active_configs:
         flag, region = display_region(decrypt(ciphertext), host)
-        region_counts[(flag, region)] = region_counts.get((flag, region), 0) + 1
+        region_key = (flag, base_region_label(region))
+        region_counts[region_key] = region_counts.get(region_key, 0) + 1
     top_regions = [
         RegionStat(emoji=flag, region=region, count=count_value)
         for (flag, region), count_value in sorted(region_counts.items(), key=lambda item: -item[1])[:5]

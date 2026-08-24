@@ -14,7 +14,7 @@ from app.database import Base
 from app.models import Node, NodeProbeAttempt, NodeProbeState, NodeState, Source, SourceQuality
 from app.services.health import _probe_targets, _selected_nodes, _speed_probe_due, apply_probe_result, normalize_node_states, purge_probe_history, purge_removed_nodes, refresh_source_qualities
 from app.services.github import SourceError, normalize_source_url
-from app.services.parser import address_diversity_key, decode_subscription_body, parse_config, parse_payload, transport_key, with_display_name, xray_json_share_links
+from app.services.parser import address_diversity_key, base_region_label, decode_subscription_body, parse_config, parse_payload, transport_key, with_display_name, xray_json_share_links
 from app.services.xray_probe import ProbeConfigError, ProbeResult, build_xray_config, probe_config
 from app.services.scoring import calculate_score
 
@@ -107,6 +107,14 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(len(links), 1)
         parsed = parse_config(links[0])
         self.assertEqual((parsed.protocol, parsed.host, parsed.port), ("ss", "95.214.55.10", 8388))
+
+
+class BaseRegionLabelTests(unittest.TestCase):
+    def test_reduces_verbose_provider_names_to_place(self):
+        self.assertEqual(base_region_label("Германия | самый свежий сервер с 10 Гбит"), "Германия")
+        self.assertEqual(base_region_label("🇳🇱 Нидерланды | GAMING #2"), "Нидерланды")
+        self.assertEqual(base_region_label("Финляндия"), "Финляндия")
+        self.assertEqual(base_region_label(""), "Неизвестный регион")
 
 
 class SourceUrlTests(unittest.TestCase):
