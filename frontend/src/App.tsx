@@ -42,6 +42,26 @@ function formatDate(value: string | null) {
   return value ? new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(new Date(value)) : "ещё не запускался";
 }
 
+function formatAgo(value: string | null | undefined) {
+  if (!value) return "—";
+  const minutes = Math.floor((Date.now() - new Date(value).getTime()) / 60000);
+  if (minutes < 1) return "только что";
+  if (minutes < 60) return `${minutes} мин назад`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} ч назад`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "вчера" : `${days} дн назад`;
+}
+
+function Sparkline({ values }: { values: number[] }) {
+  if (values.length < 2) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = Math.max(max - min, 1);
+  const points = values.map((value, index) => `${(index / (values.length - 1)) * 120},${30 - ((value - min) / range) * 26}`).join(" ");
+  return <svg className="spark" viewBox="0 0 120 32" preserveAspectRatio="none"><polyline points={points} fill="none" stroke="currentColor" strokeWidth="2"/></svg>;
+}
+
 function Login({ onSuccess }: { onSuccess: () => void }) {
   const [login, setLogin] = useState("admin");
   const [password, setPassword] = useState("");
@@ -81,6 +101,8 @@ export function App() {
   const [notice, setNotice] = useState("");
   const [currentAdmin, setCurrentAdmin] = useState<CurrentAdmin | null>(null);
   const [administrators, setAdministrators] = useState<Administrator[]>([]);
+  const [live, setLive] = useState(true);
+  const [lastSync, setLastSync] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -89,9 +111,15 @@ export function App() {
       ]);
       const administratorList = me.role === "owner" ? await request<Administrator[]>("/admin/administrators") : [];
       setCurrentAdmin(me); setAdministrators(administratorList); setDashboard(summary); setSources(sourceList); setNodes(nodeList); setChannels(channelList); setMetrics(metricList); setPolicy(policyValue); setAnalytics(analyticsValue); setSubgramStatistics(subgramValue); setAuthenticated(true);
-    } catch { setAuthenticated(false); }
+      setLastSync(new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    } catch { setAuthenticated((prev) => (prev ? prev : false)); }
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!authenticated || !live) return;
+    const timer = window.setInterval(refresh, 30000);
+    return () => window.clearInterval(timer);
+  }, [refresh, authenticated, live]);
   const notify = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(""), 3500); };
   const logout = async () => { await request("/auth/logout", { method: "POST" }); setAuthenticated(false); };
   const title = nav.find((item) => item.key === page)?.label || "Обзор";
@@ -105,7 +133,7 @@ export function App() {
       <nav aria-label="Основная навигация">{visibleNav.map(({ key, label, icon: Icon }) => <button key={key} className={page === key ? "nav-item active" : "nav-item"} onClick={() => setPage(key)}><Icon size={19}/><span>{label}</span>{key === "sources" && issueCount > 0 && <b>{issueCount}</b>}</button>)}</nav>
       <div className="sidebar-bottom"><div className="system-state"><span className="pulse"/> Система работает</div><button className="nav-item" onClick={logout}><LogOut size={19}/><span>Выйти</span></button></div>
     </aside>
-    <main className="content"><header><div className="headline"><button className="icon-button mobile-menu" aria-label="Открыть меню" onClick={() => setCompact(!compact)}><Menu size={20}/></button><div><p className="eyebrow">CONTROL / {page.toUpperCase()}</p><h1>{title}</h1></div></div><div className="header-actions"><button className="icon-button" aria-label="Обновить данные" onClick={() => { refresh(); notify("Данные обновлены"); }}><RefreshCw size={19}/></button><button className="icon-button" aria-label="Уведомления"><Bell size={19}/><i/></button><div className="avatar">A</div></div></header>
+    <main className="content"><header><div className="headline"><button className="icon-button mobile-menu" aria-label="Открыть меню" onClick={() => setCompact(!compact)}><Menu size={20}/></button><div><p className="eyebrow">CONTROL / {page.toUpperCase()}</p><h1>{title}</h1></div></div><div className="header-actions">{lastSync && <span className="muted sync-note">обновлено {lastSync}</span>}<button className={`chip ${live ? "active" : ""}`} title={live ? "Автообновление включено" : "Автообновление на паузе"} onClick={() => setLive((value) => !value)}>{live ? "LIVE" : "ПАУЗА"}</button><button className="icon-button" aria-label="Обновить данные" onClick={() => { refresh(); notify("Данные обновлены"); }}><RefreshCw size={19}/></button><button className="icon-button" aria-label="Уведомления"><Bell size={19}/><i/></button><div className="avatar">A</div></div></header>
       {notice && <div className="toast" role="status"><Check size={17}/>{notice}</div>}
       {page === "overview" && <Overview dashboard={dashboard} metrics={metrics} sources={sources} nodes={nodes} setPage={setPage} />}
       {page === "analytics" && <AnalyticsPage analytics={analytics} subgram={subgramStatistics} />}
@@ -120,6 +148,10 @@ export function App() {
 }
 
 function Overview({ dashboard, metrics, sources, nodes, setPage }: { dashboard: Dashboard | null; metrics: Metric[]; sources: Source[]; nodes: Node[]; setPage: (page: string) => void }) {
+  const ordered = [...metrics].reverse();
+  const activeSeries = ordered.map((item) => item.active_nodes);
+  const quarantineSeries = ordered.map((item) => item.quarantined_nodes);
+  const seriesByLabel: Record<string, number[]> = { "Активные ноды": activeSeries, "В карантине": quarantineSeries };
   const cards = [
     ["Активные ноды", dashboard?.active_nodes ?? 0, "прошли порог качества", Server, "mint"],
     ["Средний ping", dashboard?.average_ping ? `${dashboard.average_ping} мс` : "—", "по активному пулу", Activity, "blue"],
@@ -127,7 +159,7 @@ function Overview({ dashboard, metrics, sources, nodes, setPage }: { dashboard: 
     ["В карантине", dashboard?.quarantined_nodes ?? 0, "не выдаются в подписках", ShieldCheck, "amber"],
   ] as const;
   return <section className="page-stack"><div className="hero"><div><span className="live-badge"><span className="pulse"/> LIVE NETWORK</span><h2>Пул под контролем</h2><p>Источники обновляются каждые 20 минут. Каждая нода проходит Xray-проверку каждые 2 минуты.</p></div><button className="primary" onClick={() => setPage("sources")}>Управлять источниками <ChevronRight size={17}/></button></div>
-    <div className="metric-grid">{cards.map(([label, value, description, Icon, tone]) => <article className="metric-card" key={label}><div className={`metric-icon ${tone}`}><Icon size={20}/></div><p>{label}</p><strong>{value}</strong><span>{description}</span></article>)}</div>
+    <div className="metric-grid">{cards.map(([label, value, description, Icon, tone]) => <article className="metric-card" key={label}><div className={`metric-icon ${tone}`}><Icon size={20}/></div><p>{label}</p><strong>{value}</strong><span>{description}</span>{seriesByLabel[label]?.length ? <Sparkline values={seriesByLabel[label]}/> : null}</article>)}</div>
     <div className="split-grid"><article className="panel health-panel"><div className="panel-head"><div><p className="eyebrow">QUALITY SIGNAL</p><h3>Качество сети</h3></div><span className="status-dot">{metrics.length ? "Снимки поступают" : "Ожидание данных"}</span></div><SignalChart metrics={metrics}/><div className="health-legend"><span><i className="dot mint"/>Активные: {dashboard?.active_nodes ?? 0}</span><span><i className="dot amber"/>Карантин: {dashboard?.quarantined_nodes ?? 0}</span></div></article>
       <article className="panel source-summary"><div className="panel-head"><div><p className="eyebrow">SOURCES</p><h3>Последняя активность</h3></div><button className="text-button" onClick={() => setPage("sources")}>Все источники</button></div>{sources.slice(0, 4).map((source) => <div className="source-row" key={source.id}><span className={source.last_error ? "source-status fail" : "source-status"}/><div><strong>{source.name}</strong><small>{source.last_error || `Обновлён: ${formatDate(source.last_success_at)}`}</small></div><span className={source.is_enabled ? "pill" : "pill off"}>{source.is_enabled ? "Активен" : "Выключен"}</span></div>)}{sources.length === 0 && <Empty text="Добавьте первый GitHub-источник — его конфиги будут обработаны автоматически." action="Добавить источник" onClick={() => setPage("sources")}/>}</article></div>
     <article className="panel"><div className="panel-head"><div><p className="eyebrow">TOP POOL</p><h3>Лучшие ноды</h3></div><button className="text-button" onClick={() => setPage("nodes")}>Открыть пул</button></div><NodeTable nodes={nodes.slice(0, 6)} /></article>
@@ -192,19 +224,38 @@ function Sources({ sources, onChanged, notify }: { sources: Source[]; onChanged:
   const add = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setError(""); try { await request("/admin/sources", { method: "POST", body: JSON.stringify({ name, github_url: url }) }); setName(""); setUrl(""); await onChanged(); notify("Источник добавлен в очередь обработки"); } catch (err) { setError(err instanceof Error ? err.message : "Ошибка"); } finally { setBusy(false); } };
   const action = async (path: string, message: string) => { try { await request(path, { method: "POST" }); await onChanged(); notify(message); } catch (err) { notify(err instanceof Error ? err.message : "Ошибка операции"); } };
   return <section className="page-stack"><article className="panel add-source"><div><p className="eyebrow">SOURCES</p><h2>Добавить источник</h2><p>Поддерживаются клиентские подписки (в том числе ссылки вида happ://add/…) и файлы GitHub `blob`/`raw`. Серверы подписки проходят автоматическую проверку Xray перед публикацией.</p></div><form onSubmit={add}><label>Название<input required placeholder="Например, основной пул" value={name} onChange={(e) => setName(e.target.value)} /></label><label>Ссылка на подписку или файл<input required placeholder="happ://add/https://example.com/sub" value={url} onChange={(e) => setUrl(e.target.value)} /></label>{error && <p className="form-error"><CircleAlert size={16}/>{error}</p>}<button className="primary" disabled={busy}>{busy ? "Добавляем…" : <> <Plus size={17}/> Добавить источник</>}</button></form></article>
-    <article className="panel"><div className="panel-head"><div><p className="eyebrow">AUTOMATION QUEUE</p><h3>Источники</h3></div><span className="muted">Обновление раз в 20 минут</span></div><div className="source-list">{sources.map((source) => <div className="source-card" key={source.id}><div className="source-card-title"><span className={source.last_error ? "source-status fail" : "source-status"}/><div><strong>{source.name}</strong><small>{source.github_url}</small></div><span className={source.is_enabled ? "pill" : "pill off"}>{source.is_enabled ? "Активен" : "Выключен"}</span></div><div className="source-meta"><span>Рейтинг: <b>{source.quality_rating}%</b></span><span>Прошли: <b>{source.passed_nodes} из {source.checked_nodes}</b></span><span>Отбраковано: <b>{source.rejected_nodes}</b></span><span>Новых за запуск: <b>{source.new_nodes_last_run}</b></span><span>Последний запуск: <b>{formatDate(source.last_success_at)}</b></span><span>Хеш: <b>{source.content_hash?.slice(0, 12) || "—"}</b></span>{Object.entries(source.rejection_reasons).slice(0, 3).map(([reason, count]) => <span className="error-text" key={reason}>{reason}: {count}</span>)}{source.last_error && <span className="error-text">Ошибка источника: {source.last_error}</span>}</div><div className="card-actions"><button onClick={() => action(`/admin/sources/${source.id}/refresh`, "Обработка источника запущена")}>Запустить сейчас</button><button onClick={async () => { try { await request(`/admin/sources/${source.id}/toggle`, { method: "PATCH" }); await onChanged(); notify(source.is_enabled ? "Источник выключен" : "Источник включён"); } catch (err) { notify(err instanceof Error ? err.message : "Ошибка"); } }}>{source.is_enabled ? "Выключить" : "Включить"}</button></div></div>)}{sources.length === 0 && <Empty text="Пока нет источников. Добавьте подписку или GitHub-файл выше."/>}</div></article></section>;
+    <article className="panel"><div className="panel-head"><div><p className="eyebrow">AUTOMATION QUEUE</p><h3>Источники</h3></div><span className="muted">Обновление раз в 20 минут</span></div><div className="source-list">{sources.map((source) => <div className="source-card" key={source.id}><div className="source-card-title"><span className={source.last_error ? "source-status fail" : "source-status"}/><div><strong>{source.name}</strong><small>{source.github_url}</small></div><span className={source.is_enabled ? "pill" : "pill off"}>{source.is_enabled ? "Активен" : "Выключен"}</span></div><div className="source-meta"><span>Рейтинг: <b>{source.quality_rating}%</b></span><span>Прошли: <b>{source.passed_nodes} из {source.checked_nodes}</b></span><span>Отбраковано: <b>{source.rejected_nodes}</b></span><span>Новых за запуск: <b>{source.new_nodes_last_run}</b></span><span>Последний запуск: <b title={formatDate(source.last_success_at)}>{formatAgo(source.last_success_at)}</b></span><span>Хеш: <b>{source.content_hash?.slice(0, 12) || "—"}</b></span>{Object.entries(source.rejection_reasons).slice(0, 3).map(([reason, count]) => <span className="error-text" key={reason}>{reason}: {count}</span>)}{source.last_error && <span className="error-text">Ошибка источника: {source.last_error}</span>}</div><div className="card-actions"><button onClick={() => action(`/admin/sources/${source.id}/refresh`, "Обработка источника запущена")}>Запустить сейчас</button><button onClick={async () => { try { await request(`/admin/sources/${source.id}/toggle`, { method: "PATCH" }); await onChanged(); notify(source.is_enabled ? "Источник выключен" : "Источник включён"); } catch (err) { notify(err instanceof Error ? err.message : "Ошибка"); } }}>{source.is_enabled ? "Выключить" : "Включить"}</button></div></div>)}{sources.length === 0 && <Empty text="Пока нет источников. Добавьте подписку или GitHub-файл выше."/>}</div></article></section>;
 }
 
 function Nodes({ nodes }: { nodes: Node[] }) {
   const [selected, setSelected] = useState<Node | null>(null);
   const [attempts, setAttempts] = useState<ProbeAttempt[]>([]);
   const [loading, setLoading] = useState(false);
+  const [query, setQuery] = useState("");
+  const [stateFilter, setStateFilter] = useState<string>("all");
+  const [protocolFilter, setProtocolFilter] = useState<string>("all");
+  const protocols = useMemo(() => Array.from(new Set(nodes.map((node) => node.protocol))).sort(), [nodes]);
+  const filtered = nodes.filter((node) =>
+    (stateFilter === "all" || node.state === stateFilter)
+    && (protocolFilter === "all" || node.protocol === protocolFilter)
+    && (!query || `${node.host}:${node.port}`.toLowerCase().includes(query.toLowerCase()) || node.region.toLowerCase().includes(query.toLowerCase())));
+  const stateChips: Array<[string, string]> = [["all", "все"], ["active", "active"], ["degraded", "degraded"], ["quarantined", "quarantined"]];
   const selectNode = async (node: Node) => {
     setSelected(node); setLoading(true);
     try { setAttempts(await request<ProbeAttempt[]>(`/admin/nodes/${node.id}/probes?days=14`)); }
     finally { setLoading(false); }
   };
-  return <section className="page-stack"><div className="page-intro"><div><p className="eyebrow">TRANSPORT-BASED SORTING</p><h2>Пул нод</h2><p>📡 Мобильный интернет: VLESS Reality и Trojan. 📶 Wi‑Fi: Hysteria2, TUIC, Shadowsocks, VMess и обычный VLESS.</p></div><div className="legend"><span><i className="dot mint"/>active</span><span><i className="dot amber"/>degraded</span><span><i className="dot red"/>quarantined</span></div></div><article className="panel"><NodeTable nodes={nodes} onSelect={selectNode} /></article>{selected && <article className="panel"><div className="panel-head"><div><p className="eyebrow">LAST 14 DAYS</p><h3>История проверок: {selected.host}:{selected.port}</h3></div><button className="text-button" onClick={() => setSelected(null)}>Закрыть</button></div>{loading ? <div className="empty"><p>Загрузка истории...</p></div> : <div className="table-wrap"><table><thead><tr><th>Время</th><th>Результат</th><th>HTTP</th><th>Latency</th><th>Скорость</th><th>Ошибка</th></tr></thead><tbody>{attempts.map((attempt, index) => <tr key={`${attempt.checked_at}-${index}`}><td>{formatDate(attempt.checked_at)}</td><td><strong>{attempt.stage}</strong><small>{attempt.failure_class}</small></td><td>{attempt.http_successes} / {attempt.http_attempts}</td><td>{attempt.latency_ms ? `${Math.round(attempt.latency_ms)} мс` : "—"}</td><td>{attempt.throughput_kbps ? `${Math.round(attempt.throughput_kbps)} Кбит/с` : "—"}</td><td title={attempt.error ?? ""}>{attempt.error?.slice(0, 72) || "—"}</td></tr>)}</tbody></table>{attempts.length === 0 && <Empty text="История проверок пока пуста."/>}</div>}</article>}</section>;
+  return <section className="page-stack"><div className="page-intro"><div><p className="eyebrow">TRANSPORT-BASED SORTING</p><h2>Пул нод</h2><p>📡 Мобильный интернет: VLESS Reality и Trojan. 📶 Wi‑Fi: Hysteria2, TUIC, Shadowsocks, VMess и обычный VLESS.</p></div><div className="legend"><span><i className="dot mint"/>active</span><span><i className="dot amber"/>degraded</span><span><i className="dot red"/>quarantined</span></div></div>
+    <div className="filter-bar">
+      <input className="filter-input" placeholder="🔍 Хост, порт или регион…" value={query} onChange={(event) => setQuery(event.target.value)} />
+      {stateChips.map(([value, label]) => <button key={value} className={`chip ${stateFilter === value ? "active" : ""}`} onClick={() => setStateFilter(value)}>{label}</button>)}
+      <select className="filter-input" value={protocolFilter} onChange={(event) => setProtocolFilter(event.target.value)}>
+        <option value="all">все протоколы</option>
+        {protocols.map((protocol) => <option key={protocol} value={protocol}>{protocol}</option>)}
+      </select>
+      <span className="muted">{filtered.length} из {nodes.length}</span>
+    </div>
+    <article className="panel"><NodeTable nodes={filtered.slice(0, 300)} onSelect={selectNode} />{filtered.length > 300 && <div className="empty"><p>Показаны первые 300 из {filtered.length}. Уточните фильтр.</p></div>}</article>{selected && <article className="panel"><div className="panel-head"><div><p className="eyebrow">LAST 14 DAYS</p><h3>История проверок: {selected.host}:{selected.port}</h3></div><button className="text-button" onClick={() => setSelected(null)}>Закрыть</button></div>{loading ? <div className="empty"><p>Загрузка истории...</p></div> : <div className="table-wrap"><table><thead><tr><th>Время</th><th>Результат</th><th>HTTP</th><th>Latency</th><th>Скорость</th><th>Ошибка</th></tr></thead><tbody>{attempts.map((attempt, index) => <tr key={`${attempt.checked_at}-${index}`}><td>{formatDate(attempt.checked_at)}</td><td><strong>{attempt.stage}</strong><small>{attempt.failure_class}</small></td><td>{attempt.http_successes} / {attempt.http_attempts}</td><td>{attempt.latency_ms ? `${Math.round(attempt.latency_ms)} мс` : "—"}</td><td>{attempt.throughput_kbps ? `${Math.round(attempt.throughput_kbps)} Кбит/с` : "—"}</td><td title={attempt.error ?? ""}>{attempt.error?.slice(0, 72) || "—"}</td></tr>)}</tbody></table>{attempts.length === 0 && <Empty text="История проверок пока пуста."/>}</div>}</article>}</section>;
 }
 
 function NodeTable({ nodes, onSelect }: { nodes: Node[]; onSelect?: (node: Node) => void }) { return <div className="table-wrap"><table><thead><tr><th>Регион и сеть</th><th>Протокол</th><th>Ping / скорость</th><th>Проверка Xray</th><th>Рейтинг</th><th>Статус</th></tr></thead><tbody>{nodes.map((node) => <tr key={node.id}><td><strong>{node.region_emoji} {node.region}</strong><small>{node.network_emoji} {node.network_label} · {node.host}:{node.port}</small></td><td><span className="protocol">{node.protocol}</span></td><td>{node.avg_latency_ms ? `${Math.round(node.avg_latency_ms)} мс` : "—"}<small>{node.probe_throughput_kbps ? `${Math.round(node.probe_throughput_kbps)} Кбит/с` : "скорость —"}</small></td><td><strong>{node.probe_stage ?? "ожидает"}</strong><small title={node.probe_error ?? ""}>{node.probe_error ? node.probe_error.slice(0, 48) : `${node.success_checks} успешно / ${node.failed_checks} ошибок`}</small>{node.probe_grace_until && <small>grace до {formatDate(node.probe_grace_until)}</small>}{onSelect && <button className="text-button" onClick={() => onSelect(node)}>история</button>}</td><td><div className="score"><span style={{ width: `${Math.min(node.score, 100)}%` }}/><b>{node.score}</b></div></td><td><span className={`state ${node.state}`}>{node.state}</span></td></tr>)}</tbody></table>{nodes.length === 0 && <Empty text="Нод ещё нет: добавьте источник и запустите обработку."/>}</div>; }
@@ -237,10 +288,13 @@ function Channels({ channels, onChanged, notify }: { channels: Channel[]; onChan
 
 type ManagedUser = { id: string; telegram_id: number; username: string | null; is_blocked: boolean; device_count: number; last_membership_check: string | null };
 function UsersPage({ notify }: { notify: (message: string) => void }) {
-  const [users, setUsers] = useState<ManagedUser[]>([]); const [loading, setLoading] = useState(true);
+  const [users, setUsers] = useState<ManagedUser[]>([]); const [loading, setLoading] = useState(true); const [query, setQuery] = useState("");
   const load = useCallback(async () => { setLoading(true); try { setUsers(await request<ManagedUser[]>("/admin/users")); } catch (err) { notify(err instanceof Error ? err.message : "Не удалось загрузить пользователей"); } finally { setLoading(false); } }, [notify]);
   useEffect(() => { load(); }, [load]);
-  return <section className="page-stack"><div className="page-intro"><div><p className="eyebrow">ACCESS CONTROL</p><h2>Пользователи</h2><p>Блокировка отключает выдачу подписки. Импортированные внешние конфиги остаются вне контроля сервиса.</p></div><button className="primary" onClick={load}><RefreshCw size={16}/>Обновить</button></div><article className="panel"><div className="panel-head"><div><p className="eyebrow">TELEGRAM ACCOUNTS</p><h3>Доступ и ячейки устройств</h3></div><span className="muted">{users.length} записей</span></div><div className="table-wrap"><table><thead><tr><th>Пользователь</th><th>Telegram ID</th><th>Ячейки</th><th>Проверка каналов</th><th>Доступ</th><th/></tr></thead><tbody>{users.map((user) => <tr key={user.id}><td><strong>{user.username ? `@${user.username}` : "Без username"}</strong></td><td>{user.telegram_id}</td><td>{user.device_count} / 8</td><td>{formatDate(user.last_membership_check)}</td><td><span className={user.is_blocked ? "state quarantined" : "state active"}>{user.is_blocked ? "blocked" : "active"}</span></td><td><button className="ghost" aria-label={user.is_blocked ? "Разблокировать" : "Заблокировать"} onClick={async () => { try { await request(`/admin/users/${user.id}/block`, { method: "PATCH" }); await load(); notify(user.is_blocked ? "Пользователь разблокирован" : "Пользователь заблокирован"); } catch (err) { notify(err instanceof Error ? err.message : "Ошибка"); } }}>{user.is_blocked ? <Check size={17}/> : <X size={17}/>}</button></td></tr>)}</tbody></table>{!loading && users.length === 0 && <Empty text="Пользователи появятся после первого запуска Telegram-бота."/>}{loading && <div className="empty"><p>Загрузка…</p></div>}</div></article></section>;
+  const filtered = users.filter((user) => !query || (user.username || "").toLowerCase().includes(query.toLowerCase()) || String(user.telegram_id).includes(query));
+  return <section className="page-stack"><div className="page-intro"><div><p className="eyebrow">ACCESS CONTROL</p><h2>Пользователи</h2><p>Блокировка отключает выдачу подписки. Импортированные внешние конфиги остаются вне контроля сервиса.</p></div><button className="primary" onClick={load}><RefreshCw size={16}/>Обновить</button></div><article className="panel"><div className="panel-head"><div><p className="eyebrow">TELEGRAM ACCOUNTS</p><h3>Доступ и ячейки устройств</h3></div><span className="muted">{filtered.length} из {users.length}</span></div>
+    <div className="filter-bar"><input className="filter-input" placeholder="🔍 @username или Telegram ID…" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+    <div className="table-wrap"><table><thead><tr><th>Пользователь</th><th>Telegram ID</th><th>Ячейки</th><th>Проверка каналов</th><th>Доступ</th><th/></tr></thead><tbody>{filtered.map((user) => <tr key={user.id}><td><strong>{user.username ? `@${user.username}` : "Без username"}</strong></td><td>{user.telegram_id}</td><td>{user.device_count} / 8</td><td title={formatDate(user.last_membership_check)}>{formatAgo(user.last_membership_check)}</td><td><span className={user.is_blocked ? "state quarantined" : "state active"}>{user.is_blocked ? "blocked" : "active"}</span></td><td><button className="ghost" aria-label={user.is_blocked ? "Разблокировать" : "Заблокировать"} onClick={async () => { try { await request(`/admin/users/${user.id}/block`, { method: "PATCH" }); await load(); notify(user.is_blocked ? "Пользователь разблокирован" : "Пользователь заблокирован"); } catch (err) { notify(err instanceof Error ? err.message : "Ошибка"); } }}>{user.is_blocked ? <Check size={17}/> : <X size={17}/>}</button></td></tr>)}</tbody></table>{!loading && filtered.length === 0 && <Empty text={query ? "Ничего не найдено." : "Пользователи появятся после первого запуска Telegram-бота."}/>} {loading && <div className="empty"><p>Загрузка…</p></div>}</div></article></section>;
 }
 
 function AdministratorsPage({ administrators, onChanged, notify }: { administrators: Administrator[]; onChanged: () => Promise<void>; notify: (message: string) => void }) {
