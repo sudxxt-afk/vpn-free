@@ -25,7 +25,7 @@ from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLooku
                          SubgramWebhookPayload, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
 from app.services.github import SourceError, normalize_source_url, refresh_source
-from app.services.parser import address_diversity_key, base_region_label, classify_network_profile, display_region, parse_config, transport_key, with_display_name
+from app.services.parser import address_diversity_key, base_region_label, classify_network_profile, display_region, parse_config, transport_key
 from app.services.health import verified_pool_conditions
 from app.services.telegram import has_required_memberships, validate_bot_admin
 from app.services.subgram import get_subgram_statistics
@@ -1312,13 +1312,11 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
         if candidate:
             node, _source = candidate
             auto_ids.add(node.id)
-            payload_lines.append(with_display_name(decrypt(node.config_ciphertext), f"🇪🇺 {label}"))
+            payload_lines.append(decrypt(node.config_ciphertext))
     for node, source, profile in selected:
         if node.id in auto_ids:
             continue
-        emoji = "📡 LTE" if profile == "mobile" else "📶 Wi‑Fi"
-        flag, region = display_region(decrypt(node.config_ciphertext), node.host)
-        payload_lines.append(with_display_name(decrypt(node.config_ciphertext), f"{flag} {emoji} · {region}"))
+        payload_lines.append(decrypt(node.config_ciphertext))
     payload = "\n".join(payload_lines)
     device.last_used_at = datetime.now(timezone.utc)
     db.commit()
