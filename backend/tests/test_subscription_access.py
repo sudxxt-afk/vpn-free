@@ -104,7 +104,7 @@ class SubscriptionAccessTests(unittest.TestCase):
             db.commit()
 
             with patch("app.main.resolve_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok"))), \
-                 patch("app.main.live_subscription_body", return_value="vless://live@1.2.3.4:443?#Fresh"):
+                 patch("app.main.live_subscription_body", return_value=("vless://live@1.2.3.4:443?#Fresh", "text/plain; charset=utf-8")):
                 response = asyncio.run(subscription(token, db))
 
             self.assertEqual(response.body.decode(), "vless://live@1.2.3.4:443?#Fresh")
@@ -128,6 +128,28 @@ class SubscriptionAccessTests(unittest.TestCase):
                 response = asyncio.run(subscription(token, db))
 
             self.assertEqual(response.body.decode(), "vless://stored@9.9.9.9:443?#Stored")
+
+    def test_subscription_proxies_json_body_unmodified(self):
+        with self.Session() as db:
+            user = TelegramUser(telegram_id=1006, username="json-proxy")
+            db.add(user)
+            db.flush()
+            token = "json-proxy-token"
+            db.add(Device(user_id=user.id, slot=1, label="Phone", token_hash=hash_token(token), token_hint="json"))
+            db.add(Source(
+                name="jsonsrc", github_url="https://provider.example/subs/j",
+                raw_url="https://provider.example/connection/subs/j",
+            ))
+            db.commit()
+
+            raw_json = '[{"remarks": "🇪🇺 🚀Авто | Лучший сервер ⚡⚡", "outbounds": []}]'
+            with patch("app.main.resolve_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok"))), \
+                 patch("app.main.live_subscription_body", return_value=(raw_json, "application/json")):
+                response = asyncio.run(subscription(token, db))
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.headers["content-type"].startswith("application/json"))
+            self.assertEqual(response.body.decode(), raw_json)
 
     def test_retired_subscription_returns_happ_reissue_notice(self):
         with self.Session() as db:

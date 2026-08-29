@@ -93,11 +93,7 @@ def refresh_source(db: Session, source: Source) -> SourceRun:
         source.etag = response.headers.get("etag", source.etag)
         source.last_modified = response.headers.get("last-modified", source.last_modified)
         source.last_success_at = datetime.now(timezone.utc)
-        if source.last_body is None:
-            try:
-                source.last_body = decode_subscription_body(raw_body)
-            except ValueError:
-                pass
+        source.last_body = raw_body
         _finish(run, status="unchanged", message="Хеш тела не изменился")
         db.commit()
         return run
@@ -167,7 +163,7 @@ def refresh_source(db: Session, source: Source) -> SourceRun:
     source.pending_anomaly_count = 0
     source.last_success_at = now
     source.last_error = None
-    source.last_body = content
+    source.last_body = raw_body
     _finish(run, status="processed", found=len(configs), published=len(configs))
     db.commit()
     return run
@@ -175,31 +171,37 @@ def refresh_source(db: Session, source: Source) -> SourceRun:
 
 _LIVE_BODY_TTL_SECONDS = 300.0
 _LIVE_BODY_FAILURE_TTL_SECONDS = 60.0
-_LIVE_BODY_CACHE: dict[uuid.UUID, tuple[float, str | None]] = {}
+_LIVE_BODY_CACHE: dict[uuid.UUID, tuple[float, tuple[str, str] | None]] = {}
 _LIVE_BODY_LOCK = threading.Lock()
 
 
-def fetch_live_subscription_body(url: str, timeout: float = 8.0) -> str | None:
-    """Fetch and decode a subscription body on demand; None on any failure."""
+def fetch_live_subscription_body(url: str, timeout: float = 8.0) -> tuple[str, str] | None:
+    """Fetch a subscription body on demand, unmodified; None on any failure.
+
+    Returns (body, content_type). JSON payloads keep the provider structure
+    so clients import them exactly like the original subscription.
+    """
     try:
         with httpx.Client(follow_redirects=True, timeout=timeout) as client:
             response = client.get(url, headers={"Accept": "text/plain", "User-Agent": SOURCE_USER_AGENT})
         response.raise_for_status()
         if len(response.content) > MAX_SOURCE_BYTES:
             return None
-        return decode_subscription_body(response.text)
+        body = response.text
+        content_type = "application/json" if body.lstrip().startswith(("[", "{")) else "text/plain; charset=utf-8"
+        return body, content_type
     except (httpx.HTTPError, ValueError):
         return None
 
 
-def live_subscription_body(source: Source) -> str | None:
-    """Fresh decoded body for a subscription source with a short TTL cache.
+def live_subscription_body(source: Source) -> tuple[str, str] | None:
+    """Fresh unmodified body (body, content_type) with a short TTL cache.
 
     Returns None when the live fetch fails so callers can fall back to the
     last stored body. Failures are cached briefly so a dead provider is not
     hammered on every subscription open.
     """
-    def lookup(entry: tuple[float, str | None] | None) -> tuple[bool, str | None]:
+    def lookup(entry: tuple[float, tuple[str, str] | None] | None) -> tuple[bool, tuple[str, str] | None]:
         if not entry:
             return (False, None)
         fetched_at, body = entry

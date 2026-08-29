@@ -1265,21 +1265,32 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
             .order_by(Node.score.desc())
         ).all()
 
-    # Subscription-link sources are proxied live: the payload always mirrors
-    # what the provider serves right now (short TTL cache, fallback to the
-    # last stored body when the provider is unreachable). No selection,
-    # limits, sorting or renaming. Only GitHub file sources keep the
-    # health-check selection pipeline below.
-    passthrough_lines: list[str] = []
+    # Subscription-link sources are proxied live: the payload mirrors what
+    # the provider serves right now — raw and unmodified, JSON included —
+    # with a short TTL cache and fallback to the last stored body when the
+    # provider is unreachable. No selection, limits, sorting or renaming.
+    # Only GitHub file sources keep the health-check selection pipeline.
+    passthrough_bodies: list[tuple[str, str]] = []
     for source in db.scalars(
         select(Source).where(
             Source.is_enabled.is_(True),
             Source.raw_url.notlike("https://raw.githubusercontent.com/%"),
         ).order_by(Source.created_at)
     ).all():
-        body = live_subscription_body(source) or source.last_body
-        if body:
-            passthrough_lines.extend(line.strip() for line in body.splitlines() if line.strip())
+        fetched = live_subscription_body(source)
+        if fetched is None and source.last_body:
+            stored = source.last_body
+            fetched = (stored, "application/json" if stored.lstrip().startswith(("[", "{")) else "text/plain; charset=utf-8")
+        if fetched:
+            passthrough_bodies.append(fetched)
+    json_bodies = [body for body, content_type in passthrough_bodies if content_type == "application/json"]
+    if json_bodies:
+        return Response(
+            content=json_bodies[0],
+            media_type="application/json",
+            headers={"profile-update-interval": "1"},
+        )
+    passthrough_lines = [line for body, _ in passthrough_bodies for line in body.splitlines() if line.strip()]
     selected: list[tuple[Node, Source, str]] = []
     counts: dict[str, int] = {}
     source_counts: dict[UUID, int] = {}
