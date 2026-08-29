@@ -1,3 +1,6 @@
+import threading
+import time
+import uuid
 import hashlib
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -168,3 +171,50 @@ def refresh_source(db: Session, source: Source) -> SourceRun:
     _finish(run, status="processed", found=len(configs), published=len(configs))
     db.commit()
     return run
+
+
+_LIVE_BODY_TTL_SECONDS = 300.0
+_LIVE_BODY_FAILURE_TTL_SECONDS = 60.0
+_LIVE_BODY_CACHE: dict[uuid.UUID, tuple[float, str | None]] = {}
+_LIVE_BODY_LOCK = threading.Lock()
+
+
+def fetch_live_subscription_body(url: str, timeout: float = 8.0) -> str | None:
+    """Fetch and decode a subscription body on demand; None on any failure."""
+    try:
+        with httpx.Client(follow_redirects=True, timeout=timeout) as client:
+            response = client.get(url, headers={"Accept": "text/plain", "User-Agent": SOURCE_USER_AGENT})
+        response.raise_for_status()
+        if len(response.content) > MAX_SOURCE_BYTES:
+            return None
+        return decode_subscription_body(response.text)
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+def live_subscription_body(source: Source) -> str | None:
+    """Fresh decoded body for a subscription source with a short TTL cache.
+
+    Returns None when the live fetch fails so callers can fall back to the
+    last stored body. Failures are cached briefly so a dead provider is not
+    hammered on every subscription open.
+    """
+    def lookup(entry: tuple[float, str | None] | None) -> tuple[bool, str | None]:
+        if not entry:
+            return (False, None)
+        fetched_at, body = entry
+        ttl = _LIVE_BODY_TTL_SECONDS if body is not None else _LIVE_BODY_FAILURE_TTL_SECONDS
+        if time.monotonic() - fetched_at < ttl:
+            return (True, body)
+        return (False, None)
+
+    hit, cached = lookup(_LIVE_BODY_CACHE.get(source.id))
+    if hit:
+        return cached
+    with _LIVE_BODY_LOCK:
+        hit, cached = lookup(_LIVE_BODY_CACHE.get(source.id))
+        if hit:
+            return cached
+        body = fetch_live_subscription_body(source.raw_url)
+        _LIVE_BODY_CACHE[source.id] = (time.monotonic(), body)
+        return body

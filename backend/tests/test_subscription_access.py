@@ -89,6 +89,46 @@ class SubscriptionAccessTests(unittest.TestCase):
             self.assertNotIn("only%20Mobile", body)
             self.assertEqual(response.headers["profile-update-interval"], "1")
 
+    def test_subscription_proxies_live_body_for_subscription_sources(self):
+        with self.Session() as db:
+            user = TelegramUser(telegram_id=1004, username="live-proxy")
+            db.add(user)
+            db.flush()
+            token = "live-proxy-token"
+            db.add(Device(user_id=user.id, slot=1, label="Phone", token_hash=hash_token(token), token_hint="live"))
+            db.add(Source(
+                name="live", github_url="https://provider.example/subs/x",
+                raw_url="https://provider.example/connection/subs/x",
+                last_body="vless://stored@9.9.9.9:443?#Stored",
+            ))
+            db.commit()
+
+            with patch("app.main.resolve_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok"))), \
+                 patch("app.main.live_subscription_body", return_value="vless://live@1.2.3.4:443?#Fresh"):
+                response = asyncio.run(subscription(token, db))
+
+            self.assertEqual(response.body.decode(), "vless://live@1.2.3.4:443?#Fresh")
+
+    def test_subscription_falls_back_to_stored_body_when_live_fetch_fails(self):
+        with self.Session() as db:
+            user = TelegramUser(telegram_id=1005, username="live-fallback")
+            db.add(user)
+            db.flush()
+            token = "live-fallback-token"
+            db.add(Device(user_id=user.id, slot=1, label="Phone", token_hash=hash_token(token), token_hint="live2"))
+            db.add(Source(
+                name="live2", github_url="https://provider.example/subs/y",
+                raw_url="https://provider.example/connection/subs/y",
+                last_body="vless://stored@9.9.9.9:443?#Stored",
+            ))
+            db.commit()
+
+            with patch("app.main.resolve_subgram_access", AsyncMock(return_value=AccessDecision(True, "ok"))), \
+                 patch("app.main.live_subscription_body", return_value=None):
+                response = asyncio.run(subscription(token, db))
+
+            self.assertEqual(response.body.decode(), "vless://stored@9.9.9.9:443?#Stored")
+
     def test_retired_subscription_returns_happ_reissue_notice(self):
         with self.Session() as db:
             user = TelegramUser(telegram_id=1002, username="retired")

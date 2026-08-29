@@ -24,7 +24,7 @@ from app.schemas import (AdminCreate, AdminResponse, AdminUpdate, AdminUserLooku
                          StarDonationIntent, StarDonationPreCheckout, SubgramStatisticsDayResponse, SubgramStatisticsResponse,
                          SubgramWebhookPayload, SupportReplyPayload, SupportTicketCreate, TonDonationPrepare)
 from app.security import create_access_token, generate_device_token, hash_password, hash_token, require_admin, verify_password
-from app.services.github import SourceError, normalize_source_url, refresh_source
+from app.services.github import SourceError, live_subscription_body, normalize_source_url, refresh_source
 from app.services.parser import address_diversity_key, base_region_label, classify_network_profile, display_region, parse_config, transport_key
 from app.services.health import verified_pool_conditions
 from app.services.telegram import has_required_memberships, validate_bot_admin
@@ -1265,18 +1265,21 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
             .order_by(Node.score.desc())
         ).all()
 
-    # Subscription-link sources are served 1:1 from the last fetched body:
-    # no selection, limits, sorting or renaming. Only GitHub file sources
-    # keep the health-check selection pipeline below.
+    # Subscription-link sources are proxied live: the payload always mirrors
+    # what the provider serves right now (short TTL cache, fallback to the
+    # last stored body when the provider is unreachable). No selection,
+    # limits, sorting or renaming. Only GitHub file sources keep the
+    # health-check selection pipeline below.
     passthrough_lines: list[str] = []
     for source in db.scalars(
         select(Source).where(
             Source.is_enabled.is_(True),
-            Source.last_body.is_not(None),
             Source.raw_url.notlike("https://raw.githubusercontent.com/%"),
         ).order_by(Source.created_at)
     ).all():
-        passthrough_lines.extend(line.strip() for line in source.last_body.splitlines() if line.strip())
+        body = live_subscription_body(source) or source.last_body
+        if body:
+            passthrough_lines.extend(line.strip() for line in body.splitlines() if line.strip())
     selected: list[tuple[Node, Source, str]] = []
     counts: dict[str, int] = {}
     source_counts: dict[UUID, int] = {}
