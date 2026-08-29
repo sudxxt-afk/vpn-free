@@ -49,7 +49,7 @@ class SubscriptionAccessTests(unittest.TestCase):
             self.assertIn("start=sponsors", response.headers["support-url"])
             subgram.assert_awaited_once()
 
-    def test_subscription_marks_dedicated_auto_routes_for_happ_network_filter(self):
+    def test_subscription_serves_original_node_names_without_renaming(self):
         with self.Session() as db:
             user = TelegramUser(telegram_id=1003, username="auto-routes")
             db.add(user)
@@ -83,8 +83,10 @@ class SubscriptionAccessTests(unittest.TestCase):
                 response = asyncio.run(subscription(token, db))
 
             body = response.body.decode()
-            self.assertIn("only%20WiFi", body)
-            self.assertIn("only%20Mobile", body)
+            self.assertIn("vless://wifi-id@8.8.8.8:443?security=tls#WiFi", body)
+            self.assertIn("vless://mobile-id@8.8.4.4:443?security=reality#Mobile", body)
+            self.assertNotIn("only%20WiFi", body)
+            self.assertNotIn("only%20Mobile", body)
             self.assertEqual(response.headers["profile-update-interval"], "1")
 
     def test_retired_subscription_returns_happ_reissue_notice(self):
