@@ -1253,7 +1253,7 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
         rows = db.execute(
             select(Node, Source)
             .join(Source, Source.id == Node.source_id)
-            .where(Source.is_enabled.is_(True), Source.raw_url.notlike("https://raw.githubusercontent.com/%"), Node.state != NodeState.REMOVED)
+            .where(Source.is_enabled.is_(True), Source.raw_url.like("https://raw.githubusercontent.com/%"), Node.state != NodeState.REMOVED)
             .order_by(Node.score.desc())
         ).all()
     else:
@@ -1261,7 +1261,7 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
             select(Node, Source)
             .join(Source, Source.id == Node.source_id)
             .join(NodeProbeState, NodeProbeState.node_id == Node.id)
-            .where(Source.raw_url.notlike("https://raw.githubusercontent.com/%"), *verified_pool_conditions())
+            .where(Source.raw_url.like("https://raw.githubusercontent.com/%"), *verified_pool_conditions())
             .order_by(Node.score.desc())
         ).all()
 
