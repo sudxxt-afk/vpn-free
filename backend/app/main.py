@@ -62,6 +62,7 @@ def bootstrap() -> None:
                 db.execute(text("ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]'"))
                 db.execute(text("ALTER TABLE broadcast_campaigns ADD COLUMN IF NOT EXISTS client_request_id UUID"))
                 db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_broadcast_campaigns_client_request_id ON broadcast_campaigns (client_request_id) WHERE client_request_id IS NOT NULL"))
+                db.execute(text("ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_body TEXT"))
                 db.commit()
             exists = db.scalar(select(AdminUser).where(AdminUser.login == settings.initial_admin_login))
             if not exists:
@@ -1252,7 +1253,7 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
         rows = db.execute(
             select(Node, Source)
             .join(Source, Source.id == Node.source_id)
-            .where(Source.is_enabled.is_(True), Node.state != NodeState.REMOVED)
+            .where(Source.is_enabled.is_(True), Source.raw_url.notlike("https://raw.githubusercontent.com/%"), Node.state != NodeState.REMOVED)
             .order_by(Node.score.desc())
         ).all()
     else:
@@ -1260,9 +1261,22 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
             select(Node, Source)
             .join(Source, Source.id == Node.source_id)
             .join(NodeProbeState, NodeProbeState.node_id == Node.id)
-            .where(*verified_pool_conditions())
+            .where(Source.raw_url.notlike("https://raw.githubusercontent.com/%"), *verified_pool_conditions())
             .order_by(Node.score.desc())
         ).all()
+
+    # Subscription-link sources are served 1:1 from the last fetched body:
+    # no selection, limits, sorting or renaming. Only GitHub file sources
+    # keep the health-check selection pipeline below.
+    passthrough_lines: list[str] = []
+    for source in db.scalars(
+        select(Source).where(
+            Source.is_enabled.is_(True),
+            Source.last_body.is_not(None),
+            Source.raw_url.notlike("https://raw.githubusercontent.com/%"),
+        ).order_by(Source.created_at)
+    ).all():
+        passthrough_lines.extend(line.strip() for line in source.last_body.splitlines() if line.strip())
     selected: list[tuple[Node, Source, str]] = []
     counts: dict[str, int] = {}
     source_counts: dict[UUID, int] = {}
@@ -1304,20 +1318,21 @@ async def subscription(token: str, db: Session = Depends(get_db)) -> Response:
     # and `only Mobile` markers.  Keep those markers on the two dedicated
     # routes only: the remaining servers are universal fallbacks if a
     # transport hint turns out to be wrong for a particular carrier.
-    for profile, label in (
-        ("wifi", "📶 only WiFi · Автоподключение Wi‑Fi"),
-        ("mobile", "📡 only Mobile · Автоподключение LTE"),
-    ):
-        candidate = best_by_profile.get(profile)
-        if candidate:
-            node, _source = candidate
-            auto_ids.add(node.id)
-            payload_lines.append(decrypt(node.config_ciphertext))
+    if not passthrough_lines:
+        for profile, label in (
+            ("wifi", "📶 only WiFi · Автоподключение Wi‑Fi"),
+            ("mobile", "📡 only Mobile · Автоподключение LTE"),
+        ):
+            candidate = best_by_profile.get(profile)
+            if candidate:
+                node, _source = candidate
+                auto_ids.add(node.id)
+                payload_lines.append(decrypt(node.config_ciphertext))
     for node, source, profile in selected:
         if node.id in auto_ids:
             continue
         payload_lines.append(decrypt(node.config_ciphertext))
-    payload = "\n".join(payload_lines)
+    payload = "\n".join(passthrough_lines + payload_lines)
     device.last_used_at = datetime.now(timezone.utc)
     db.commit()
     # HAPP's ordinary URL subscriptions expect newline-separated share links,

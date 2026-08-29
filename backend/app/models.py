@@ -112,6 +112,7 @@ class Source(Base):
     etag: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_modified: Mapped[str | None] = mapped_column(String(255), nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     pending_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     pending_anomaly_count: Mapped[int] = mapped_column(Integer, default=0)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

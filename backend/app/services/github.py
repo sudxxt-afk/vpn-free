@@ -63,9 +63,9 @@ def _finish(run: SourceRun, *, status: str, found: int = 0, published: int = 0, 
 def refresh_source(db: Session, source: Source) -> SourceRun:
     run = _run(db, source, "running")
     headers = {"Accept": "text/plain", "User-Agent": SOURCE_USER_AGENT}
-    if source.etag:
+    if source.last_body and source.etag:
         headers["If-None-Match"] = source.etag
-    if source.last_modified:
+    if source.last_body and source.last_modified:
         headers["If-Modified-Since"] = source.last_modified
     try:
         with httpx.Client(follow_redirects=True, timeout=18.0) as client:
@@ -90,6 +90,11 @@ def refresh_source(db: Session, source: Source) -> SourceRun:
         source.etag = response.headers.get("etag", source.etag)
         source.last_modified = response.headers.get("last-modified", source.last_modified)
         source.last_success_at = datetime.now(timezone.utc)
+        if source.last_body is None:
+            try:
+                source.last_body = decode_subscription_body(raw_body)
+            except ValueError:
+                pass
         _finish(run, status="unchanged", message="Хеш тела не изменился")
         db.commit()
         return run
@@ -159,6 +164,7 @@ def refresh_source(db: Session, source: Source) -> SourceRun:
     source.pending_anomaly_count = 0
     source.last_success_at = now
     source.last_error = None
+    source.last_body = content
     _finish(run, status="processed", found=len(configs), published=len(configs))
     db.commit()
     return run
